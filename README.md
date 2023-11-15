@@ -163,8 +163,6 @@ Generate GitHub RESTful token
 3. No scope needs to be checked, fill in the name
 4. Directly generate a token starting with `ghp_xxxx` or `gho_xxxx`.
 
-The log file will be saved in `vul4c/storage/logging`.
-
 A sample `config.yaml` file is as follows
 ```yaml
 proxy:
@@ -186,8 +184,8 @@ Create a empty file named `github_token.txt` and fill it with all github tokens 
 
 Sample file:
 ```text
-ghp_11111
-ghp_22222
+ghp_xxxx11111
+ghp_xxxx22222
 ```
 
 ### 🚀 Run the pipelines
