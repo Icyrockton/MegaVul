@@ -171,8 +171,6 @@ proxy:
   enable: false
   http_url: http://172.31.112.1:1234
   https_url: http://172.31.112.1:1234
-github: # github tokens
-
 dependencies:
   java: /home/tom/.sdkman/candidates/java/current/bin
   scala: /home/tom/.sdkman/candidates/scala/current/bin
@@ -184,21 +182,13 @@ log_level:
   DEBUG # [DEBUG, INFO, WARNING, ERROR]
 ```
 
-A sample `github_token.txt` github token file is as follows, one line one token
+Create a empty file named `github_token.txt` and fill it with all github tokens (one line one token)
+
+Sample file:
 ```text
 ghp_11111
 ghp_22222
 ```
-
-
-Run the following code pre-build the joern and download scala dependencies.
-```shell
-cd ./vul4c/joern
-sbt
-# wait sbt download dependencies and build to finish
-sbt:joern> exit # exit sbt
-```
-
 
 ### 🚀 Run the pipelines
 

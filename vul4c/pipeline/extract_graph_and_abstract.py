@@ -85,6 +85,18 @@ def run_joern_once(timeout) -> int:
         sleep(5)
         return 0
 
+def run_joern_build():
+    """
+        run the following code pre-build the joern and download scala dependencies.
+    """
+    global_logger.info('joern begin download dependencies and build')
+    my_env = os.environ.copy()
+    return_code = subprocess.check_call(f'sbt exit', shell=True, text=True, env=my_env, stderr=subprocess.STDOUT)
+    if return_code != 0:
+        raise RuntimeError("joern build failed. please see the error message")
+    global_logger.info('joern build finished')
+
+
 def run_joern():
     run_joern_cnt = 0
     global_logger.info('[Joern] begin run joern!')
@@ -124,6 +136,7 @@ def call_joern_to_generate_graph():
     shutil.copy(joern_script_path,
                 joern_path / "joern-cli/frontends/c2cpg/src/test/scala/io/joern/c2cpg/io" / joern_script_name)
 
+    run_joern_build()
     run_joern()
 
     # shutdown is not graceful, some json corrupted, check json is complete
