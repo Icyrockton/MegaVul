@@ -1,0 +1,3685 @@
+options {
+    DEBUG_TOKEN_MANAGER = false;
+    DEBUG_PARSER = false;
+    UNICODE_INPUT = true;
+    STATIC = false;
+    TOKEN_EXTENDS = "PositionToken";
+    COMMON_TOKEN_ACTION = true;
+    USER_CHAR_STREAM = true;
+}
+PARSER_BEGIN(PythonParser)
+package io.joern.pythonparser;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Stack;
+import io.joern.pythonparser.ast.Module;
+import io.joern.pythonparser.ast.*;
+public class PythonParser {
+  static class BoxedObject<T> {
+    T object;
+    BoxedObject(T object) {
+      this.object = object;
+    }
+  }
+  TokenAttributeProvider attributes(Token startToken, Token endToken) {
+    return new TokenAttributeProvider(startToken, endToken);
+  }
+  NodeAttributeProvider attributes(iattributes attributeAstNode, Token endToken) {
+    return new NodeAttributeProvider(attributeAstNode, endToken);
+  }
+
+  private ArrayList<ErrorStatement> errors = new ArrayList<ErrorStatement>();
+  ArrayList<ErrorStatement> getErrors() {
+    return errors;
+  }
+
+  ErrorStatement recoverAndCreateErrorStmt(Token lastCorrectToken, Exception exception) {
+    try {
+      getNextToken();
+      while (token.kind != SEMICOLON && token.kind != NEWLINE && token.kind != EOF) {
+        getNextToken();
+      }
+    } catch (Exception e) {
+      // We are already in error handling/recovery mode and try to advance the token stream
+      // to a point where we have hope to parse something meaningful again. If we get an
+      // exception during this advancing we end up here.
+      // We just stop advancing, store the previous error which brought us here in the first
+      // place and hope the parse can recover from the current state.
+    }
+
+    Token errorStartToken = lastCorrectToken.next;
+    ErrorStatement errorStmt = new ErrorStatement(exception, attributes(errorStartToken, token));
+    errors.add(errorStmt);
+    return errorStmt;
+  }
+
+  // Since this grammar is handling python3 and python2 code, we need to deal with
+  // abiguities between those two python versions.
+  // One such ambiguity is caused by the print statements (not expressions) like:
+  //   print (x), y
+  // In python3 this is a Tuple(elts = [Call(func = print, args = [x]), y])
+  // whereas in python this is a Call(func = print, args = [Tuple(elts = [x]), y]).
+  // Our grammar parses this as a python3 style tuple and this method rewrites the
+  // tuple to the python2 style call.
+  // The reasoning for this is that a statement with a top level tuple used in no
+  // expression is superfluous and thus a rare unexpected case. One could argue
+  // that this case is also expected to be rare in python2 so only time will tell
+  // whether this was the right choice.
+  istmt printStatmentToPython2StyleRewrite(istmt stmt) {
+    if (stmt instanceof Expr) {
+      Expr expr = (Expr) stmt;
+      if (expr.value() instanceof Tuple) {
+        Tuple tuple = (Tuple)expr.value();
+        if (tuple.elts().nonEmpty() && tuple.elts().head() instanceof Call) {
+          Call call = (Call) tuple.elts().head();
+          if (call.func() instanceof Name) {
+            Name name = (Name) call.func();
+            if (name.id().equals("print") && call.keywords().isEmpty()) {
+              ArrayList<iexpr> combinedArgs = new ArrayList<iexpr>();
+              int argCount = call.args().size();
+              for (int i = 0; i < argCount; i++) {
+                combinedArgs.add(call.args().apply(i));
+              }
+              int elementCount = tuple.elts().size();
+              for (int i = 1; i < elementCount; i++) {
+                combinedArgs.add(tuple.elts().apply(i));
+              }
+              return stmt = new Expr(
+                new Call(call.func(), combinedArgs, new ArrayList<Keyword>(),
+                 call.attributeProvider()));
+            }
+          }
+        }
+      }
+    }
+    return stmt;
+  }
+
+  void setCurrentToken(Token setTo) {
+    token = setTo;
+    jj_ntk = -1;
+  }
+}
+PARSER_END(PythonParser)
+
+TOKEN_MGR_DECLS:
+{
+  // All kinds of parentheses are tracked here: ( { [
+  Stack<Integer> parenthesesStack = new Stack<Integer>();
+  int currentIndent = 0;
+  int dedentsToEmit;
+  Stack<Integer> indentStack = new Stack<Integer>();
+  {
+    pushParenScope();
+    indentStack.push(0);
+  }
+
+  void pushParenScope() {
+    parenthesesStack.push(0);
+  }
+
+  void popParenScope() {
+    parenthesesStack.pop();
+  }
+
+  void countOpenParen() {
+     Integer top = parenthesesStack.pop();
+     parenthesesStack.push(top + 1);
+  }
+
+  void countCloseParen() {
+     Integer top = parenthesesStack.pop();
+     parenthesesStack.push(top - 1);
+  }
+
+  int openParenCounter() {
+    return parenthesesStack.peek();
+  }
+
+  // matchedToken must have the form: <prefix><oneOrThreeQuotes>
+  // The matched tokens image this cut to not contain <oneOrThreeQuotes>
+  // and the input stream is backed up by the length(<oneOrThreeQuotes>)
+  String adjustTokenAndBackupInput(Token matchedToken, int prefixLen) {
+    int quoteLen = matchedToken.image.length() - prefixLen;
+    String result = matchedToken.image.substring(0, matchedToken.image.length() - quoteLen);
+    input_stream.backup(quoteLen);
+    return result;
+  }
+
+  // Cut token image by quote length since we do not want the close quote in the content.
+  String cutContentTokenImage(Token matchedToken, int quoteLen) {
+    String result = matchedToken.image.substring(0, matchedToken.image.length() - quoteLen);
+    return result;
+  }
+
+  // Cut content token image by length of endToken1 or endToken2 since we do not them in the content.
+  // In our case this is either a close quote or "{".
+  // We also backup the input by this length to generate an extra token for close quote or "{"
+  String cutContentTokenImageAndBackupInput(Token matchedToken, String endToken1, String endToken2) {
+
+    int length;
+    if (matchedToken.image.endsWith(endToken1)) {
+        length = endToken1.length();
+    } else if (matchedToken.image.endsWith(endToken2)) {
+        length = endToken2.length();
+    } else {
+        throw new RuntimeException("Unexpected end of matchedToken " + matchedToken.image);
+    }
+    String result = matchedToken.image.substring(0, matchedToken.image.length() - length);
+    input_stream.backup(length);
+    return result;
+  }
+
+  // Stores the format string lexing state we were in before switching to the DEFAULT state
+  // in order to parse a replacement field. Naturally needs to be a stack since replacement
+  // fields can be nested.
+  // Note that during format string lexing of strings containing multiple replacement fields,
+  // we switch back and forth multiple times between the lexer DEFAULT state and the stacks
+  // top state.
+  Stack<Integer> formatStringLexStateStack = new Stack<Integer>();
+
+  // Number of opened curly brackets while parsing a format string in FORMAT_SPEC_LEX.
+  int formatSpecOpenCurly = 0;
+
+  void CommonTokenAction(Token token) {
+    CharStreamImpl inputStreamImpl = (CharStreamImpl)input_stream;
+    token.startPos = inputStreamImpl.getBeginPos();
+    token.endPos = token.startPos + token.image.length();
+  }
+}
+
+TOKEN: {
+  <IF: "if">
+| <ELSE: "else">
+| <ELIF: "elif">
+| <OR: "or">
+| <AND: "and">
+| <NOT: "not">
+| <DEF: "def">
+| <ASYNC: "async">
+| <LAMBDA: "lambda">
+| <FOR: "for">
+| <WITH: "with">
+| <RETURN: "return">
+| <TRY: "try">
+| <EXCEPT: "except">
+| <FINALLY: "finally">
+| <CLASS: "class">
+| <WHILE: "while">
+| <IMPORT: "import">
+| <FROM: "from">
+| <AS: "as">
+| <RAISE: "raise">
+| <PASS: "pass">
+| <DEL: "del">
+| <YIELD: "yield">
+| <ASSERT: "assert">
+| <BREAK: "break">
+| <CONTINUE: "continue">
+| <GLOBAL: "global">
+| <NONLOCAL: "nonlocal">
+| <AWAIT: "await">
+| <NONE: "None">
+| <TRUE: "True">
+| <FALSE: "False">
+| <ARROW: "->">
+| <ELLIPSIS: "...">
+| <COLON: ":"> {
+  // Only on top level of the replacement field lexing we can
+  // switch into the format spec lexing. At top level
+  // openParenCounter() is 1 because of the opening curly bracket.
+  if (!formatStringLexStateStack.isEmpty() && openParenCounter() == 1) {
+    // We reached a ":" of a format spec of a replacement field of a format string.
+    SwitchTo(FORMAT_SPEC_LEX);
+  }
+}
+| <SEMICOLON: ";">
+| <COMMA: ",">
+| <ASSIGN: "=">
+| <COLON_ASSIGN: ":=">
+| <PLUS_ASSIGN: "+=">
+| <MINUS_ASSIGN: "-=">
+| <STAR_ASSIGN: "*=">
+| <AT_ASSIGN: "@=">
+| <DIV_ASSIGN: "/=">
+| <MOD_ASSIGN: "%=">
+| <BIT_AND_ASSIGN: "&=">
+| <BIT_OR_ASSIGN: "|=">
+| <BIT_XOR_ASSIGN: "^=">
+| <LSHIFT_ASSIGN: "<<=">
+| <RSHIFT_ASSIGN: ">>=">
+| <POW_ASSIGN: "**=">
+| <FLOOR_DIV_ASSIGN: "//=">
+| <EQ: "==">
+| <NEQ: "!=">
+| <LT: "<">
+| <LTE: "<=">
+| <GT: ">">
+| <GTE: ">=">
+| <IS: "is">
+| <IN: "in">
+| <PLUS: "+">
+| <MINUS: "-">
+| <AT: "@">
+| <DIV: "/">
+| <FLOOR_DIV: "//">
+| <MOD: "%">
+| <INVERT: "~">
+| <LSHIFT: "<<">
+| <RSHIFT: ">>">
+| <BIT_OR: "|">
+| <BIT_XOR: "^">
+| <BIT_AND: "&">
+| <PAREN_OPEN: "("> { countOpenParen(); }
+| <PAREN_CLOSE: ")"> { countCloseParen(); }
+| <SQUARE_OPEN: "["> { countOpenParen(); }
+| <SQUARE_CLOSE: "]"> { countCloseParen(); }
+| <CURLY_OPEN: "{"> { countOpenParen(); }
+| <CURLY_CLOSE: "}"> {
+  countCloseParen();
+  if (!formatStringLexStateStack.isEmpty() && openParenCounter() == 0) {
+    popParenScope();
+    SwitchTo(formatStringLexStateStack.peek());
+  }
+}
+| <DOT: ".">
+| <STAR: "*">
+| <DOUBLE_STAR: "**">
+| <STR_CONVERSION: "!s">
+| <REPR_CONVERSION: "!r">
+| <ASCII_CONVERSION: "!a">
+}
+
+// Number tokens:
+TOKEN: {
+  <DEC_INTEGER: <NON_ZERO_DIGIT> (("_")? <DIGIT>)* | "0" (("_")? "0")*>
+| <BIN_INTEGER: "0" ("b" | "B") (("_")? <BIN_DIGIT>)+>
+| <OCT_INTEGER:
+  (
+    "0"  ("o" | "O") (("_")? <OCT_DIGIT>)+
+  | // Just a leading 0 without a following o or 0 is python2 style.
+    // This conflicts with the new python3 decimal integer style of writing
+    // zero as an arbitrary number of 0.
+    // This the DEC_INTEGER rule is defined first such a literal is
+    // tokenized as DEC_INTEGER. So we prioritize python3 here.
+    // Since the resulting integer value is in both cases zero the slight
+    // loss precession for python2 seems exceptable.
+  "0" (<OCT_DIGIT>)+
+  )
+  >
+| <HEX_INTEGER: "0" ("x" | "X") (("_")? <HEX_DIGIT>)+>
+| <#DIGIT: ["0" - "9"] >
+| <#NON_ZERO_DIGIT: ["1" - "9"] >
+| <#BIN_DIGIT: "0" | "1" >
+| <#OCT_DIGIT: ["0" - "7"] >
+| <#HEX_DIGIT: ["0" - "9"] | ["a" - "f"] | ["A" - "F"] >
+| <FLOAT:
+  (
+    (<DIGIT_PART> "." (<DIGIT_PART>)? (<EXPONENT>)?)
+  | ("." <DIGIT_PART> (<EXPONENT>)?)
+  | (<DIGIT_PART> <EXPONENT>)
+  )
+  >
+| <#EXPONENT: ("e" | "E") ("+" | "-")? <DIGIT_PART>>
+| <#DIGIT_PART: <DIGIT> (("_")? <DIGIT>)*>
+| <IMAGINARY: (<FLOAT> | <DIGIT_PART>) ("j" | "J")>
+}
+
+// Based on https://docs.python.org/3/reference/lexical_analysis.html#identifiers
+// and https://www.unicode.org/Public/14.0.0/ucd/DerivedCoreProperties.txt.
+TOKEN: {
+  <NAME: <ID_START> (<ID_CONTINUE>)*>
+| <#ID_START: ["\u0041" - "\u005A"] // L&  [26] LATIN CAPITAL LETTER A..LATIN CAPITAL LETTER Z
+            | ["\u0061" - "\u007A"] // L&  [26] LATIN SMALL LETTER A..LATIN SMALL LETTER Z
+            | "\u00AA" // Lo       FEMININE ORDINAL INDICATOR
+            | "\u00B5" // L&       MICRO SIGN
+            | "\u00BA" // Lo       MASCULINE ORDINAL INDICATOR
+            | ["\u00C0" - "\u00D6"] // L&  [23] LATIN CAPITAL LETTER A WITH GRAVE..LATIN CAPITAL LETTER O WITH DIAERESIS
+            | ["\u00D8" - "\u00F6"] // L&  [31] LATIN CAPITAL LETTER O WITH STROKE..LATIN SMALL LETTER O WITH DIAERESIS
+            | ["\u00F8" - "\u01BA"] // L& [195] LATIN SMALL LETTER O WITH STROKE..LATIN SMALL LETTER EZH WITH TAIL
+            | "\u01BB" // Lo       LATIN LETTER TWO WITH STROKE
+            | ["\u01BC" - "\u01BF"] // L&   [4] LATIN CAPITAL LETTER TONE FIVE..LATIN LETTER WYNN
+            | ["\u01C0" - "\u01C3"] // Lo   [4] LATIN LETTER DENTAL CLICK..LATIN LETTER RETROFLEX CLICK
+            | ["\u01C4" - "\u0293"] // L& [208] LATIN CAPITAL LETTER DZ WITH CARON..LATIN SMALL LETTER EZH WITH CURL
+            | "\u0294" // Lo       LATIN LETTER GLOTTAL STOP
+            | ["\u0295" - "\u02AF"] // L&  [27] LATIN LETTER PHARYNGEAL VOICED FRICATIVE..LATIN SMALL LETTER TURNED H WITH FISHHOOK AND TAIL
+            | ["\u02B0" - "\u02C1"] // Lm  [18] MODIFIER LETTER SMALL H..MODIFIER LETTER REVERSED GLOTTAL STOP
+            | ["\u02C6" - "\u02D1"] // Lm  [12] MODIFIER LETTER CIRCUMFLEX ACCENT..MODIFIER LETTER HALF TRIANGULAR COLON
+            | ["\u02E0" - "\u02E4"] // Lm   [5] MODIFIER LETTER SMALL GAMMA..MODIFIER LETTER SMALL REVERSED GLOTTAL STOP
+            | "\u02EC" // Lm       MODIFIER LETTER VOICING
+            | "\u02EE" // Lm       MODIFIER LETTER DOUBLE APOSTROPHE
+            | ["\u0370" - "\u0373"] // L&   [4] GREEK CAPITAL LETTER HETA..GREEK SMALL LETTER ARCHAIC SAMPI
+            | "\u0374" // Lm       GREEK NUMERAL SIGN
+            | ["\u0376" - "\u0377"] // L&   [2] GREEK CAPITAL LETTER PAMPHYLIAN DIGAMMA..GREEK SMALL LETTER PAMPHYLIAN DIGAMMA
+            | "\u037A" // Lm       GREEK YPOGEGRAMMENI
+            | ["\u037B" - "\u037D"] // L&   [3] GREEK SMALL REVERSED LUNATE SIGMA SYMBOL..GREEK SMALL REVERSED DOTTED LUNATE SIGMA SYMBOL
+            | "\u037F" // L&       GREEK CAPITAL LETTER YOT
+            | "\u0386" // L&       GREEK CAPITAL LETTER ALPHA WITH TONOS
+            | ["\u0388" - "\u038A"] // L&   [3] GREEK CAPITAL LETTER EPSILON WITH TONOS..GREEK CAPITAL LETTER IOTA WITH TONOS
+            | "\u038C" // L&       GREEK CAPITAL LETTER OMICRON WITH TONOS
+            | ["\u038E" - "\u03A1"] // L&  [20] GREEK CAPITAL LETTER UPSILON WITH TONOS..GREEK CAPITAL LETTER RHO
+            | ["\u03A3" - "\u03F5"] // L&  [83] GREEK CAPITAL LETTER SIGMA..GREEK LUNATE EPSILON SYMBOL
+            | ["\u03F7" - "\u0481"] // L& [139] GREEK CAPITAL LETTER SHO..CYRILLIC SMALL LETTER KOPPA
+            | ["\u048A" - "\u052F"] // L& [166] CYRILLIC CAPITAL LETTER SHORT I WITH TAIL..CYRILLIC SMALL LETTER EL WITH DESCENDER
+            | ["\u0531" - "\u0556"] // L&  [38] ARMENIAN CAPITAL LETTER AYB..ARMENIAN CAPITAL LETTER FEH
+            | "\u0559" // Lm       ARMENIAN MODIFIER LETTER LEFT HALF RING
+            | ["\u0560" - "\u0588"] // L&  [41] ARMENIAN SMALL LETTER TURNED AYB..ARMENIAN SMALL LETTER YI WITH STROKE
+            | ["\u05D0" - "\u05EA"] // Lo  [27] HEBREW LETTER ALEF..HEBREW LETTER TAV
+            | ["\u05EF" - "\u05F2"] // Lo   [4] HEBREW YOD TRIANGLE..HEBREW LIGATURE YIDDISH DOUBLE YOD
+            | ["\u0620" - "\u063F"] // Lo  [32] ARABIC LETTER KASHMIRI YEH..ARABIC LETTER FARSI YEH WITH THREE DOTS ABOVE
+            | "\u0640" // Lm       ARABIC TATWEEL
+            | ["\u0641" - "\u064A"] // Lo  [10] ARABIC LETTER FEH..ARABIC LETTER YEH
+            | ["\u066E" - "\u066F"] // Lo   [2] ARABIC LETTER DOTLESS BEH..ARABIC LETTER DOTLESS QAF
+            | ["\u0671" - "\u06D3"] // Lo  [99] ARABIC LETTER ALEF WASLA..ARABIC LETTER YEH BARREE WITH HAMZA ABOVE
+            | "\u06D5" // Lo       ARABIC LETTER AE
+            | ["\u06E5" - "\u06E6"] // Lm   [2] ARABIC SMALL WAW..ARABIC SMALL YEH
+            | ["\u06EE" - "\u06EF"] // Lo   [2] ARABIC LETTER DAL WITH INVERTED V..ARABIC LETTER REH WITH INVERTED V
+            | ["\u06FA" - "\u06FC"] // Lo   [3] ARABIC LETTER SHEEN WITH DOT BELOW..ARABIC LETTER GHAIN WITH DOT BELOW
+            | "\u06FF" // Lo       ARABIC LETTER HEH WITH INVERTED V
+            | "\u0710" // Lo       SYRIAC LETTER ALAPH
+            | ["\u0712" - "\u072F"] // Lo  [30] SYRIAC LETTER BETH..SYRIAC LETTER PERSIAN DHALATH
+            | ["\u074D" - "\u07A5"] // Lo  [89] SYRIAC LETTER SOGDIAN ZHAIN..THAANA LETTER WAAVU
+            | "\u07B1" // Lo       THAANA LETTER NAA
+            | ["\u07CA" - "\u07EA"] // Lo  [33] NKO LETTER A..NKO LETTER JONA RA
+            | ["\u07F4" - "\u07F5"] // Lm   [2] NKO HIGH TONE APOSTROPHE..NKO LOW TONE APOSTROPHE
+            | "\u07FA" // Lm       NKO LAJANYALAN
+            | ["\u0800" - "\u0815"] // Lo  [22] SAMARITAN LETTER ALAF..SAMARITAN LETTER TAAF
+            | "\u081A" // Lm       SAMARITAN MODIFIER LETTER EPENTHETIC YUT
+            | "\u0824" // Lm       SAMARITAN MODIFIER LETTER SHORT A
+            | "\u0828" // Lm       SAMARITAN MODIFIER LETTER I
+            | ["\u0840" - "\u0858"] // Lo  [25] MANDAIC LETTER HALQA..MANDAIC LETTER AIN
+            | ["\u0860" - "\u086A"] // Lo  [11] SYRIAC LETTER MALAYALAM NGA..SYRIAC LETTER MALAYALAM SSA
+            | ["\u0870" - "\u0887"] // Lo  [24] ARABIC LETTER ALEF WITH ATTACHED FATHA..ARABIC BASELINE ROUND DOT
+            | ["\u0889" - "\u088E"] // Lo   [6] ARABIC LETTER NOON WITH INVERTED SMALL V..ARABIC VERTICAL TAIL
+            | ["\u08A0" - "\u08C8"] // Lo  [41] ARABIC LETTER BEH WITH SMALL V BELOW..ARABIC LETTER GRAF
+            | "\u08C9" // Lm       ARABIC SMALL FARSI YEH
+            | ["\u0904" - "\u0939"] // Lo  [54] DEVANAGARI LETTER SHORT A..DEVANAGARI LETTER HA
+            | "\u093D" // Lo       DEVANAGARI SIGN AVAGRAHA
+            | "\u0950" // Lo       DEVANAGARI OM
+            | ["\u0958" - "\u0961"] // Lo  [10] DEVANAGARI LETTER QA..DEVANAGARI LETTER VOCALIC LL
+            | "\u0971" // Lm       DEVANAGARI SIGN HIGH SPACING DOT
+            | ["\u0972" - "\u0980"] // Lo  [15] DEVANAGARI LETTER CANDRA A..BENGALI ANJI
+            | ["\u0985" - "\u098C"] // Lo   [8] BENGALI LETTER A..BENGALI LETTER VOCALIC L
+            | ["\u098F" - "\u0990"] // Lo   [2] BENGALI LETTER E..BENGALI LETTER AI
+            | ["\u0993" - "\u09A8"] // Lo  [22] BENGALI LETTER O..BENGALI LETTER NA
+            | ["\u09AA" - "\u09B0"] // Lo   [7] BENGALI LETTER PA..BENGALI LETTER RA
+            | "\u09B2" // Lo       BENGALI LETTER LA
+            | ["\u09B6" - "\u09B9"] // Lo   [4] BENGALI LETTER SHA..BENGALI LETTER HA
+            | "\u09BD" // Lo       BENGALI SIGN AVAGRAHA
+            | "\u09CE" // Lo       BENGALI LETTER KHANDA TA
+            | ["\u09DC" - "\u09DD"] // Lo   [2] BENGALI LETTER RRA..BENGALI LETTER RHA
+            | ["\u09DF" - "\u09E1"] // Lo   [3] BENGALI LETTER YYA..BENGALI LETTER VOCALIC LL
+            | ["\u09F0" - "\u09F1"] // Lo   [2] BENGALI LETTER RA WITH MIDDLE DIAGONAL..BENGALI LETTER RA WITH LOWER DIAGONAL
+            | "\u09FC" // Lo       BENGALI LETTER VEDIC ANUSVARA
+            | ["\u0A05" - "\u0A0A"] // Lo   [6] GURMUKHI LETTER A..GURMUKHI LETTER UU
+            | ["\u0A0F" - "\u0A10"] // Lo   [2] GURMUKHI LETTER EE..GURMUKHI LETTER AI
+            | ["\u0A13" - "\u0A28"] // Lo  [22] GURMUKHI LETTER OO..GURMUKHI LETTER NA
+            | ["\u0A2A" - "\u0A30"] // Lo   [7] GURMUKHI LETTER PA..GURMUKHI LETTER RA
+            | ["\u0A32" - "\u0A33"] // Lo   [2] GURMUKHI LETTER LA..GURMUKHI LETTER LLA
+            | ["\u0A35" - "\u0A36"] // Lo   [2] GURMUKHI LETTER VA..GURMUKHI LETTER SHA
+            | ["\u0A38" - "\u0A39"] // Lo   [2] GURMUKHI LETTER SA..GURMUKHI LETTER HA
+            | ["\u0A59" - "\u0A5C"] // Lo   [4] GURMUKHI LETTER KHHA..GURMUKHI LETTER RRA
+            | "\u0A5E" // Lo       GURMUKHI LETTER FA
+            | ["\u0A72" - "\u0A74"] // Lo   [3] GURMUKHI IRI..GURMUKHI EK ONKAR
+            | ["\u0A85" - "\u0A8D"] // Lo   [9] GUJARATI LETTER A..GUJARATI VOWEL CANDRA E
+            | ["\u0A8F" - "\u0A91"] // Lo   [3] GUJARATI LETTER E..GUJARATI VOWEL CANDRA O
+            | ["\u0A93" - "\u0AA8"] // Lo  [22] GUJARATI LETTER O..GUJARATI LETTER NA
+            | ["\u0AAA" - "\u0AB0"] // Lo   [7] GUJARATI LETTER PA..GUJARATI LETTER RA
+            | ["\u0AB2" - "\u0AB3"] // Lo   [2] GUJARATI LETTER LA..GUJARATI LETTER LLA
+            | ["\u0AB5" - "\u0AB9"] // Lo   [5] GUJARATI LETTER VA..GUJARATI LETTER HA
+            | "\u0ABD" // Lo       GUJARATI SIGN AVAGRAHA
+            | "\u0AD0" // Lo       GUJARATI OM
+            | ["\u0AE0" - "\u0AE1"] // Lo   [2] GUJARATI LETTER VOCALIC RR..GUJARATI LETTER VOCALIC LL
+            | "\u0AF9" // Lo       GUJARATI LETTER ZHA
+            | ["\u0B05" - "\u0B0C"] // Lo   [8] ORIYA LETTER A..ORIYA LETTER VOCALIC L
+            | ["\u0B0F" - "\u0B10"] // Lo   [2] ORIYA LETTER E..ORIYA LETTER AI
+            | ["\u0B13" - "\u0B28"] // Lo  [22] ORIYA LETTER O..ORIYA LETTER NA
+            | ["\u0B2A" - "\u0B30"] // Lo   [7] ORIYA LETTER PA..ORIYA LETTER RA
+            | ["\u0B32" - "\u0B33"] // Lo   [2] ORIYA LETTER LA..ORIYA LETTER LLA
+            | ["\u0B35" - "\u0B39"] // Lo   [5] ORIYA LETTER VA..ORIYA LETTER HA
+            | "\u0B3D" // Lo       ORIYA SIGN AVAGRAHA
+            | ["\u0B5C" - "\u0B5D"] // Lo   [2] ORIYA LETTER RRA..ORIYA LETTER RHA
+            | ["\u0B5F" - "\u0B61"] // Lo   [3] ORIYA LETTER YYA..ORIYA LETTER VOCALIC LL
+            | "\u0B71" // Lo       ORIYA LETTER WA
+            | "\u0B83" // Lo       TAMIL SIGN VISARGA
+            | ["\u0B85" - "\u0B8A"] // Lo   [6] TAMIL LETTER A..TAMIL LETTER UU
+            | ["\u0B8E" - "\u0B90"] // Lo   [3] TAMIL LETTER E..TAMIL LETTER AI
+            | ["\u0B92" - "\u0B95"] // Lo   [4] TAMIL LETTER O..TAMIL LETTER KA
+            | ["\u0B99" - "\u0B9A"] // Lo   [2] TAMIL LETTER NGA..TAMIL LETTER CA
+            | "\u0B9C" // Lo       TAMIL LETTER JA
+            | ["\u0B9E" - "\u0B9F"] // Lo   [2] TAMIL LETTER NYA..TAMIL LETTER TTA
+            | ["\u0BA3" - "\u0BA4"] // Lo   [2] TAMIL LETTER NNA..TAMIL LETTER TA
+            | ["\u0BA8" - "\u0BAA"] // Lo   [3] TAMIL LETTER NA..TAMIL LETTER PA
+            | ["\u0BAE" - "\u0BB9"] // Lo  [12] TAMIL LETTER MA..TAMIL LETTER HA
+            | "\u0BD0" // Lo       TAMIL OM
+            | ["\u0C05" - "\u0C0C"] // Lo   [8] TELUGU LETTER A..TELUGU LETTER VOCALIC L
+            | ["\u0C0E" - "\u0C10"] // Lo   [3] TELUGU LETTER E..TELUGU LETTER AI
+            | ["\u0C12" - "\u0C28"] // Lo  [23] TELUGU LETTER O..TELUGU LETTER NA
+            | ["\u0C2A" - "\u0C39"] // Lo  [16] TELUGU LETTER PA..TELUGU LETTER HA
+            | "\u0C3D" // Lo       TELUGU SIGN AVAGRAHA
+            | ["\u0C58" - "\u0C5A"] // Lo   [3] TELUGU LETTER TSA..TELUGU LETTER RRRA
+            | "\u0C5D" // Lo       TELUGU LETTER NAKAARA POLLU
+            | ["\u0C60" - "\u0C61"] // Lo   [2] TELUGU LETTER VOCALIC RR..TELUGU LETTER VOCALIC LL
+            | "\u0C80" // Lo       KANNADA SIGN SPACING CANDRABINDU
+            | ["\u0C85" - "\u0C8C"] // Lo   [8] KANNADA LETTER A..KANNADA LETTER VOCALIC L
+            | ["\u0C8E" - "\u0C90"] // Lo   [3] KANNADA LETTER E..KANNADA LETTER AI
+            | ["\u0C92" - "\u0CA8"] // Lo  [23] KANNADA LETTER O..KANNADA LETTER NA
+            | ["\u0CAA" - "\u0CB3"] // Lo  [10] KANNADA LETTER PA..KANNADA LETTER LLA
+            | ["\u0CB5" - "\u0CB9"] // Lo   [5] KANNADA LETTER VA..KANNADA LETTER HA
+            | "\u0CBD" // Lo       KANNADA SIGN AVAGRAHA
+            | ["\u0CDD" - "\u0CDE"] // Lo   [2] KANNADA LETTER NAKAARA POLLU..KANNADA LETTER FA
+            | ["\u0CE0" - "\u0CE1"] // Lo   [2] KANNADA LETTER VOCALIC RR..KANNADA LETTER VOCALIC LL
+            | ["\u0CF1" - "\u0CF2"] // Lo   [2] KANNADA SIGN JIHVAMULIYA..KANNADA SIGN UPADHMANIYA
+            | ["\u0D04" - "\u0D0C"] // Lo   [9] MALAYALAM LETTER VEDIC ANUSVARA..MALAYALAM LETTER VOCALIC L
+            | ["\u0D0E" - "\u0D10"] // Lo   [3] MALAYALAM LETTER E..MALAYALAM LETTER AI
+            | ["\u0D12" - "\u0D3A"] // Lo  [41] MALAYALAM LETTER O..MALAYALAM LETTER TTTA
+            | "\u0D3D" // Lo       MALAYALAM SIGN AVAGRAHA
+            | "\u0D4E" // Lo       MALAYALAM LETTER DOT REPH
+            | ["\u0D54" - "\u0D56"] // Lo   [3] MALAYALAM LETTER CHILLU M..MALAYALAM LETTER CHILLU LLL
+            | ["\u0D5F" - "\u0D61"] // Lo   [3] MALAYALAM LETTER ARCHAIC II..MALAYALAM LETTER VOCALIC LL
+            | ["\u0D7A" - "\u0D7F"] // Lo   [6] MALAYALAM LETTER CHILLU NN..MALAYALAM LETTER CHILLU K
+            | ["\u0D85" - "\u0D96"] // Lo  [18] SINHALA LETTER AYANNA..SINHALA LETTER AUYANNA
+            | ["\u0D9A" - "\u0DB1"] // Lo  [24] SINHALA LETTER ALPAPRAANA KAYANNA..SINHALA LETTER DANTAJA NAYANNA
+            | ["\u0DB3" - "\u0DBB"] // Lo   [9] SINHALA LETTER SANYAKA DAYANNA..SINHALA LETTER RAYANNA
+            | "\u0DBD" // Lo       SINHALA LETTER DANTAJA LAYANNA
+            | ["\u0DC0" - "\u0DC6"] // Lo   [7] SINHALA LETTER VAYANNA..SINHALA LETTER FAYANNA
+            | ["\u0E01" - "\u0E30"] // Lo  [48] THAI CHARACTER KO KAI..THAI CHARACTER SARA A
+            | ["\u0E32" - "\u0E33"] // Lo   [2] THAI CHARACTER SARA AA..THAI CHARACTER SARA AM
+            | ["\u0E40" - "\u0E45"] // Lo   [6] THAI CHARACTER SARA E..THAI CHARACTER LAKKHANGYAO
+            | "\u0E46" // Lm       THAI CHARACTER MAIYAMOK
+            | ["\u0E81" - "\u0E82"] // Lo   [2] LAO LETTER KO..LAO LETTER KHO SUNG
+            | "\u0E84" // Lo       LAO LETTER KHO TAM
+            | ["\u0E86" - "\u0E8A"] // Lo   [5] LAO LETTER PALI GHA..LAO LETTER SO TAM
+            | ["\u0E8C" - "\u0EA3"] // Lo  [24] LAO LETTER PALI JHA..LAO LETTER LO LING
+            | "\u0EA5" // Lo       LAO LETTER LO LOOT
+            | ["\u0EA7" - "\u0EB0"] // Lo  [10] LAO LETTER WO..LAO VOWEL SIGN A
+            | ["\u0EB2" - "\u0EB3"] // Lo   [2] LAO VOWEL SIGN AA..LAO VOWEL SIGN AM
+            | "\u0EBD" // Lo       LAO SEMIVOWEL SIGN NYO
+            | ["\u0EC0" - "\u0EC4"] // Lo   [5] LAO VOWEL SIGN E..LAO VOWEL SIGN AI
+            | "\u0EC6" // Lm       LAO KO LA
+            | ["\u0EDC" - "\u0EDF"] // Lo   [4] LAO HO NO..LAO LETTER KHMU NYO
+            | "\u0F00" // Lo       TIBETAN SYLLABLE OM
+            | ["\u0F40" - "\u0F47"] // Lo   [8] TIBETAN LETTER KA..TIBETAN LETTER JA
+            | ["\u0F49" - "\u0F6C"] // Lo  [36] TIBETAN LETTER NYA..TIBETAN LETTER RRA
+            | ["\u0F88" - "\u0F8C"] // Lo   [5] TIBETAN SIGN LCE TSA CAN..TIBETAN SIGN INVERTED MCHU CAN
+            | ["\u1000" - "\u102A"] // Lo  [43] MYANMAR LETTER KA..MYANMAR LETTER AU
+            | "\u103F" // Lo       MYANMAR LETTER GREAT SA
+            | ["\u1050" - "\u1055"] // Lo   [6] MYANMAR LETTER SHA..MYANMAR LETTER VOCALIC LL
+            | ["\u105A" - "\u105D"] // Lo   [4] MYANMAR LETTER MON NGA..MYANMAR LETTER MON BBE
+            | "\u1061" // Lo       MYANMAR LETTER SGAW KAREN SHA
+            | ["\u1065" - "\u1066"] // Lo   [2] MYANMAR LETTER WESTERN PWO KAREN THA..MYANMAR LETTER WESTERN PWO KAREN PWA
+            | ["\u106E" - "\u1070"] // Lo   [3] MYANMAR LETTER EASTERN PWO KAREN NNA..MYANMAR LETTER EASTERN PWO KAREN GHWA
+            | ["\u1075" - "\u1081"] // Lo  [13] MYANMAR LETTER SHAN KA..MYANMAR LETTER SHAN HA
+            | "\u108E" // Lo       MYANMAR LETTER RUMAI PALAUNG FA
+            | ["\u10A0" - "\u10C5"] // L&  [38] GEORGIAN CAPITAL LETTER AN..GEORGIAN CAPITAL LETTER HOE
+            | "\u10C7" // L&       GEORGIAN CAPITAL LETTER YN
+            | "\u10CD" // L&       GEORGIAN CAPITAL LETTER AEN
+            | ["\u10D0" - "\u10FA"] // L&  [43] GEORGIAN LETTER AN..GEORGIAN LETTER AIN
+            | "\u10FC" // Lm       MODIFIER LETTER GEORGIAN NAR
+            | ["\u10FD" - "\u10FF"] // L&   [3] GEORGIAN LETTER AEN..GEORGIAN LETTER LABIAL SIGN
+            | ["\u1100" - "\u1248"] // Lo [329] HANGUL CHOSEONG KIYEOK..ETHIOPIC SYLLABLE QWA
+            | ["\u124A" - "\u124D"] // Lo   [4] ETHIOPIC SYLLABLE QWI..ETHIOPIC SYLLABLE QWE
+            | ["\u1250" - "\u1256"] // Lo   [7] ETHIOPIC SYLLABLE QHA..ETHIOPIC SYLLABLE QHO
+            | "\u1258" // Lo       ETHIOPIC SYLLABLE QHWA
+            | ["\u125A" - "\u125D"] // Lo   [4] ETHIOPIC SYLLABLE QHWI..ETHIOPIC SYLLABLE QHWE
+            | ["\u1260" - "\u1288"] // Lo  [41] ETHIOPIC SYLLABLE BA..ETHIOPIC SYLLABLE XWA
+            | ["\u128A" - "\u128D"] // Lo   [4] ETHIOPIC SYLLABLE XWI..ETHIOPIC SYLLABLE XWE
+            | ["\u1290" - "\u12B0"] // Lo  [33] ETHIOPIC SYLLABLE NA..ETHIOPIC SYLLABLE KWA
+            | ["\u12B2" - "\u12B5"] // Lo   [4] ETHIOPIC SYLLABLE KWI..ETHIOPIC SYLLABLE KWE
+            | ["\u12B8" - "\u12BE"] // Lo   [7] ETHIOPIC SYLLABLE KXA..ETHIOPIC SYLLABLE KXO
+            | "\u12C0" // Lo       ETHIOPIC SYLLABLE KXWA
+            | ["\u12C2" - "\u12C5"] // Lo   [4] ETHIOPIC SYLLABLE KXWI..ETHIOPIC SYLLABLE KXWE
+            | ["\u12C8" - "\u12D6"] // Lo  [15] ETHIOPIC SYLLABLE WA..ETHIOPIC SYLLABLE PHARYNGEAL O
+            | ["\u12D8" - "\u1310"] // Lo  [57] ETHIOPIC SYLLABLE ZA..ETHIOPIC SYLLABLE GWA
+            | ["\u1312" - "\u1315"] // Lo   [4] ETHIOPIC SYLLABLE GWI..ETHIOPIC SYLLABLE GWE
+            | ["\u1318" - "\u135A"] // Lo  [67] ETHIOPIC SYLLABLE GGA..ETHIOPIC SYLLABLE FYA
+            | ["\u1380" - "\u138F"] // Lo  [16] ETHIOPIC SYLLABLE SEBATBEIT MWA..ETHIOPIC SYLLABLE PWE
+            | ["\u13A0" - "\u13F5"] // L&  [86] CHEROKEE LETTER A..CHEROKEE LETTER MV
+            | ["\u13F8" - "\u13FD"] // L&   [6] CHEROKEE SMALL LETTER YE..CHEROKEE SMALL LETTER MV
+            | ["\u1401" - "\u166C"] // Lo [620] CANADIAN SYLLABICS E..CANADIAN SYLLABICS CARRIER TTSA
+            | ["\u166F" - "\u167F"] // Lo  [17] CANADIAN SYLLABICS QAI..CANADIAN SYLLABICS BLACKFOOT W
+            | ["\u1681" - "\u169A"] // Lo  [26] OGHAM LETTER BEITH..OGHAM LETTER PEITH
+            | ["\u16A0" - "\u16EA"] // Lo  [75] RUNIC LETTER FEHU FEOH FE F..RUNIC LETTER X
+            | ["\u16EE" - "\u16F0"] // Nl   [3] RUNIC ARLAUG SYMBOL..RUNIC BELGTHOR SYMBOL
+            | ["\u16F1" - "\u16F8"] // Lo   [8] RUNIC LETTER K..RUNIC LETTER FRANKS CASKET AESC
+            | ["\u1700" - "\u1711"] // Lo  [18] TAGALOG LETTER A..TAGALOG LETTER HA
+            | ["\u171F" - "\u1731"] // Lo  [19] TAGALOG LETTER ARCHAIC RA..HANUNOO LETTER HA
+            | ["\u1740" - "\u1751"] // Lo  [18] BUHID LETTER A..BUHID LETTER HA
+            | ["\u1760" - "\u176C"] // Lo  [13] TAGBANWA LETTER A..TAGBANWA LETTER YA
+            | ["\u176E" - "\u1770"] // Lo   [3] TAGBANWA LETTER LA..TAGBANWA LETTER SA
+            | ["\u1780" - "\u17B3"] // Lo  [52] KHMER LETTER KA..KHMER INDEPENDENT VOWEL QAU
+            | "\u17D7" // Lm       KHMER SIGN LEK TOO
+            | "\u17DC" // Lo       KHMER SIGN AVAKRAHASANYA
+            | ["\u1820" - "\u1842"] // Lo  [35] MONGOLIAN LETTER A..MONGOLIAN LETTER CHI
+            | "\u1843" // Lm       MONGOLIAN LETTER TODO LONG VOWEL SIGN
+            | ["\u1844" - "\u1878"] // Lo  [53] MONGOLIAN LETTER TODO E..MONGOLIAN LETTER CHA WITH TWO DOTS
+            | ["\u1880" - "\u1884"] // Lo   [5] MONGOLIAN LETTER ALI GALI ANUSVARA ONE..MONGOLIAN LETTER ALI GALI INVERTED UBADAMA
+            | ["\u1885" - "\u1886"] // Mn   [2] MONGOLIAN LETTER ALI GALI BALUDA..MONGOLIAN LETTER ALI GALI THREE BALUDA
+            | ["\u1887" - "\u18A8"] // Lo  [34] MONGOLIAN LETTER ALI GALI A..MONGOLIAN LETTER MANCHU ALI GALI BHA
+            | "\u18AA" // Lo       MONGOLIAN LETTER MANCHU ALI GALI LHA
+            | ["\u18B0" - "\u18F5"] // Lo  [70] CANADIAN SYLLABICS OY..CANADIAN SYLLABICS CARRIER DENTAL S
+            | ["\u1900" - "\u191E"] // Lo  [31] LIMBU VOWEL-CARRIER LETTER..LIMBU LETTER TRA
+            | ["\u1950" - "\u196D"] // Lo  [30] TAI LE LETTER KA..TAI LE LETTER AI
+            | ["\u1970" - "\u1974"] // Lo   [5] TAI LE LETTER TONE-2..TAI LE LETTER TONE-6
+            | ["\u1980" - "\u19AB"] // Lo  [44] NEW TAI LUE LETTER HIGH QA..NEW TAI LUE LETTER LOW SUA
+            | ["\u19B0" - "\u19C9"] // Lo  [26] NEW TAI LUE VOWEL SIGN VOWEL SHORTENER..NEW TAI LUE TONE MARK-2
+            | ["\u1A00" - "\u1A16"] // Lo  [23] BUGINESE LETTER KA..BUGINESE LETTER HA
+            | ["\u1A20" - "\u1A54"] // Lo  [53] TAI THAM LETTER HIGH KA..TAI THAM LETTER GREAT SA
+            | "\u1AA7" // Lm       TAI THAM SIGN MAI YAMOK
+            | ["\u1B05" - "\u1B33"] // Lo  [47] BALINESE LETTER AKARA..BALINESE LETTER HA
+            | ["\u1B45" - "\u1B4C"] // Lo   [8] BALINESE LETTER KAF SASAK..BALINESE LETTER ARCHAIC JNYA
+            | ["\u1B83" - "\u1BA0"] // Lo  [30] SUNDANESE LETTER A..SUNDANESE LETTER HA
+            | ["\u1BAE" - "\u1BAF"] // Lo   [2] SUNDANESE LETTER KHA..SUNDANESE LETTER SYA
+            | ["\u1BBA" - "\u1BE5"] // Lo  [44] SUNDANESE AVAGRAHA..BATAK LETTER U
+            | ["\u1C00" - "\u1C23"] // Lo  [36] LEPCHA LETTER KA..LEPCHA LETTER A
+            | ["\u1C4D" - "\u1C4F"] // Lo   [3] LEPCHA LETTER TTA..LEPCHA LETTER DDA
+            | ["\u1C5A" - "\u1C77"] // Lo  [30] OL CHIKI LETTER LA..OL CHIKI LETTER OH
+            | ["\u1C78" - "\u1C7D"] // Lm   [6] OL CHIKI MU TTUDDAG..OL CHIKI AHAD
+            | ["\u1C80" - "\u1C88"] // L&   [9] CYRILLIC SMALL LETTER ROUNDED VE..CYRILLIC SMALL LETTER UNBLENDED UK
+            | ["\u1C90" - "\u1CBA"] // L&  [43] GEORGIAN MTAVRULI CAPITAL LETTER AN..GEORGIAN MTAVRULI CAPITAL LETTER AIN
+            | ["\u1CBD" - "\u1CBF"] // L&   [3] GEORGIAN MTAVRULI CAPITAL LETTER AEN..GEORGIAN MTAVRULI CAPITAL LETTER LABIAL SIGN
+            | ["\u1CE9" - "\u1CEC"] // Lo   [4] VEDIC SIGN ANUSVARA ANTARGOMUKHA..VEDIC SIGN ANUSVARA VAMAGOMUKHA WITH TAIL
+            | ["\u1CEE" - "\u1CF3"] // Lo   [6] VEDIC SIGN HEXIFORM LONG ANUSVARA..VEDIC SIGN ROTATED ARDHAVISARGA
+            | ["\u1CF5" - "\u1CF6"] // Lo   [2] VEDIC SIGN JIHVAMULIYA..VEDIC SIGN UPADHMANIYA
+            | "\u1CFA" // Lo       VEDIC SIGN DOUBLE ANUSVARA ANTARGOMUKHA
+            | ["\u1D00" - "\u1D2B"] // L&  [44] LATIN LETTER SMALL CAPITAL A..CYRILLIC LETTER SMALL CAPITAL EL
+            | ["\u1D2C" - "\u1D6A"] // Lm  [63] MODIFIER LETTER CAPITAL A..GREEK SUBSCRIPT SMALL LETTER CHI
+            | ["\u1D6B" - "\u1D77"] // L&  [13] LATIN SMALL LETTER UE..LATIN SMALL LETTER TURNED G
+            | "\u1D78" // Lm       MODIFIER LETTER CYRILLIC EN
+            | ["\u1D79" - "\u1D9A"] // L&  [34] LATIN SMALL LETTER INSULAR G..LATIN SMALL LETTER EZH WITH RETROFLEX HOOK
+            | ["\u1D9B" - "\u1DBF"] // Lm  [37] MODIFIER LETTER SMALL TURNED ALPHA..MODIFIER LETTER SMALL THETA
+            | ["\u1E00" - "\u1F15"] // L& [278] LATIN CAPITAL LETTER A WITH RING BELOW..GREEK SMALL LETTER EPSILON WITH DASIA AND OXIA
+            | ["\u1F18" - "\u1F1D"] // L&   [6] GREEK CAPITAL LETTER EPSILON WITH PSILI..GREEK CAPITAL LETTER EPSILON WITH DASIA AND OXIA
+            | ["\u1F20" - "\u1F45"] // L&  [38] GREEK SMALL LETTER ETA WITH PSILI..GREEK SMALL LETTER OMICRON WITH DASIA AND OXIA
+            | ["\u1F48" - "\u1F4D"] // L&   [6] GREEK CAPITAL LETTER OMICRON WITH PSILI..GREEK CAPITAL LETTER OMICRON WITH DASIA AND OXIA
+            | ["\u1F50" - "\u1F57"] // L&   [8] GREEK SMALL LETTER UPSILON WITH PSILI..GREEK SMALL LETTER UPSILON WITH DASIA AND PERISPOMENI
+            | "\u1F59" // L&       GREEK CAPITAL LETTER UPSILON WITH DASIA
+            | "\u1F5B" // L&       GREEK CAPITAL LETTER UPSILON WITH DASIA AND VARIA
+            | "\u1F5D" // L&       GREEK CAPITAL LETTER UPSILON WITH DASIA AND OXIA
+            | ["\u1F5F" - "\u1F7D"] // L&  [31] GREEK CAPITAL LETTER UPSILON WITH DASIA AND PERISPOMENI..GREEK SMALL LETTER OMEGA WITH OXIA
+            | ["\u1F80" - "\u1FB4"] // L&  [53] GREEK SMALL LETTER ALPHA WITH PSILI AND YPOGEGRAMMENI..GREEK SMALL LETTER ALPHA WITH OXIA AND YPOGEGRAMMENI
+            | ["\u1FB6" - "\u1FBC"] // L&   [7] GREEK SMALL LETTER ALPHA WITH PERISPOMENI..GREEK CAPITAL LETTER ALPHA WITH PROSGEGRAMMENI
+            | "\u1FBE" // L&       GREEK PROSGEGRAMMENI
+            | ["\u1FC2" - "\u1FC4"] // L&   [3] GREEK SMALL LETTER ETA WITH VARIA AND YPOGEGRAMMENI..GREEK SMALL LETTER ETA WITH OXIA AND YPOGEGRAMMENI
+            | ["\u1FC6" - "\u1FCC"] // L&   [7] GREEK SMALL LETTER ETA WITH PERISPOMENI..GREEK CAPITAL LETTER ETA WITH PROSGEGRAMMENI
+            | ["\u1FD0" - "\u1FD3"] // L&   [4] GREEK SMALL LETTER IOTA WITH VRACHY..GREEK SMALL LETTER IOTA WITH DIALYTIKA AND OXIA
+            | ["\u1FD6" - "\u1FDB"] // L&   [6] GREEK SMALL LETTER IOTA WITH PERISPOMENI..GREEK CAPITAL LETTER IOTA WITH OXIA
+            | ["\u1FE0" - "\u1FEC"] // L&  [13] GREEK SMALL LETTER UPSILON WITH VRACHY..GREEK CAPITAL LETTER RHO WITH DASIA
+            | ["\u1FF2" - "\u1FF4"] // L&   [3] GREEK SMALL LETTER OMEGA WITH VARIA AND YPOGEGRAMMENI..GREEK SMALL LETTER OMEGA WITH OXIA AND YPOGEGRAMMENI
+            | ["\u1FF6" - "\u1FFC"] // L&   [7] GREEK SMALL LETTER OMEGA WITH PERISPOMENI..GREEK CAPITAL LETTER OMEGA WITH PROSGEGRAMMENI
+            | "\u2071" // Lm       SUPERSCRIPT LATIN SMALL LETTER I
+            | "\u207F" // Lm       SUPERSCRIPT LATIN SMALL LETTER N
+            | ["\u2090" - "\u209C"] // Lm  [13] LATIN SUBSCRIPT SMALL LETTER A..LATIN SUBSCRIPT SMALL LETTER T
+            | "\u2102" // L&       DOUBLE-STRUCK CAPITAL C
+            | "\u2107" // L&       EULER CONSTANT
+            | ["\u210A" - "\u2113"] // L&  [10] SCRIPT SMALL G..SCRIPT SMALL L
+            | "\u2115" // L&       DOUBLE-STRUCK CAPITAL N
+            | "\u2118" // Sm       SCRIPT CAPITAL P
+            | ["\u2119" - "\u211D"] // L&   [5] DOUBLE-STRUCK CAPITAL P..DOUBLE-STRUCK CAPITAL R
+            | "\u2124" // L&       DOUBLE-STRUCK CAPITAL Z
+            | "\u2126" // L&       OHM SIGN
+            | "\u2128" // L&       BLACK-LETTER CAPITAL Z
+            | ["\u212A" - "\u212D"] // L&   [4] KELVIN SIGN..BLACK-LETTER CAPITAL C
+            | "\u212E" // So       ESTIMATED SYMBOL
+            | ["\u212F" - "\u2134"] // L&   [6] SCRIPT SMALL E..SCRIPT SMALL O
+            | ["\u2135" - "\u2138"] // Lo   [4] ALEF SYMBOL..DALET SYMBOL
+            | "\u2139" // L&       INFORMATION SOURCE
+            | ["\u213C" - "\u213F"] // L&   [4] DOUBLE-STRUCK SMALL PI..DOUBLE-STRUCK CAPITAL PI
+            | ["\u2145" - "\u2149"] // L&   [5] DOUBLE-STRUCK ITALIC CAPITAL D..DOUBLE-STRUCK ITALIC SMALL J
+            | "\u214E" // L&       TURNED SMALL F
+            | ["\u2160" - "\u2182"] // Nl  [35] ROMAN NUMERAL ONE..ROMAN NUMERAL TEN THOUSAND
+            | ["\u2183" - "\u2184"] // L&   [2] ROMAN NUMERAL REVERSED ONE HUNDRED..LATIN SMALL LETTER REVERSED C
+            | ["\u2185" - "\u2188"] // Nl   [4] ROMAN NUMERAL SIX LATE FORM..ROMAN NUMERAL ONE HUNDRED THOUSAND
+            | ["\u2C00" - "\u2C7B"] // L& [124] GLAGOLITIC CAPITAL LETTER AZU..LATIN LETTER SMALL CAPITAL TURNED E
+            | ["\u2C7C" - "\u2C7D"] // Lm   [2] LATIN SUBSCRIPT SMALL LETTER J..MODIFIER LETTER CAPITAL V
+            | ["\u2C7E" - "\u2CE4"] // L& [103] LATIN CAPITAL LETTER S WITH SWASH TAIL..COPTIC SYMBOL KAI
+            | ["\u2CEB" - "\u2CEE"] // L&   [4] COPTIC CAPITAL LETTER CRYPTOGRAMMIC SHEI..COPTIC SMALL LETTER CRYPTOGRAMMIC GANGIA
+            | ["\u2CF2" - "\u2CF3"] // L&   [2] COPTIC CAPITAL LETTER BOHAIRIC KHEI..COPTIC SMALL LETTER BOHAIRIC KHEI
+            | ["\u2D00" - "\u2D25"] // L&  [38] GEORGIAN SMALL LETTER AN..GEORGIAN SMALL LETTER HOE
+            | "\u2D27" // L&       GEORGIAN SMALL LETTER YN
+            | "\u2D2D" // L&       GEORGIAN SMALL LETTER AEN
+            | ["\u2D30" - "\u2D67"] // Lo  [56] TIFINAGH LETTER YA..TIFINAGH LETTER YO
+            | "\u2D6F" // Lm       TIFINAGH MODIFIER LETTER LABIALIZATION MARK
+            | ["\u2D80" - "\u2D96"] // Lo  [23] ETHIOPIC SYLLABLE LOA..ETHIOPIC SYLLABLE GGWE
+            | ["\u2DA0" - "\u2DA6"] // Lo   [7] ETHIOPIC SYLLABLE SSA..ETHIOPIC SYLLABLE SSO
+            | ["\u2DA8" - "\u2DAE"] // Lo   [7] ETHIOPIC SYLLABLE CCA..ETHIOPIC SYLLABLE CCO
+            | ["\u2DB0" - "\u2DB6"] // Lo   [7] ETHIOPIC SYLLABLE ZZA..ETHIOPIC SYLLABLE ZZO
+            | ["\u2DB8" - "\u2DBE"] // Lo   [7] ETHIOPIC SYLLABLE CCHA..ETHIOPIC SYLLABLE CCHO
+            | ["\u2DC0" - "\u2DC6"] // Lo   [7] ETHIOPIC SYLLABLE QYA..ETHIOPIC SYLLABLE QYO
+            | ["\u2DC8" - "\u2DCE"] // Lo   [7] ETHIOPIC SYLLABLE KYA..ETHIOPIC SYLLABLE KYO
+            | ["\u2DD0" - "\u2DD6"] // Lo   [7] ETHIOPIC SYLLABLE XYA..ETHIOPIC SYLLABLE XYO
+            | ["\u2DD8" - "\u2DDE"] // Lo   [7] ETHIOPIC SYLLABLE GYA..ETHIOPIC SYLLABLE GYO
+            | "\u3005" // Lm       IDEOGRAPHIC ITERATION MARK
+            | "\u3006" // Lo       IDEOGRAPHIC CLOSING MARK
+            | "\u3007" // Nl       IDEOGRAPHIC NUMBER ZERO
+            | ["\u3021" - "\u3029"] // Nl   [9] HANGZHOU NUMERAL ONE..HANGZHOU NUMERAL NINE
+            | ["\u3031" - "\u3035"] // Lm   [5] VERTICAL KANA REPEAT MARK..VERTICAL KANA REPEAT MARK LOWER HALF
+            | ["\u3038" - "\u303A"] // Nl   [3] HANGZHOU NUMERAL TEN..HANGZHOU NUMERAL THIRTY
+            | "\u303B" // Lm       VERTICAL IDEOGRAPHIC ITERATION MARK
+            | "\u303C" // Lo       MASU MARK
+            | ["\u3041" - "\u3096"] // Lo  [86] HIRAGANA LETTER SMALL A..HIRAGANA LETTER SMALL KE
+            | ["\u309B" - "\u309C"] // Sk   [2] KATAKANA-HIRAGANA VOICED SOUND MARK..KATAKANA-HIRAGANA SEMI-VOICED SOUND MARK
+            | ["\u309D" - "\u309E"] // Lm   [2] HIRAGANA ITERATION MARK..HIRAGANA VOICED ITERATION MARK
+            | "\u309F" // Lo       HIRAGANA DIGRAPH YORI
+            | ["\u30A1" - "\u30FA"] // Lo  [90] KATAKANA LETTER SMALL A..KATAKANA LETTER VO
+            | ["\u30FC" - "\u30FE"] // Lm   [3] KATAKANA-HIRAGANA PROLONGED SOUND MARK..KATAKANA VOICED ITERATION MARK
+            | "\u30FF" // Lo       KATAKANA DIGRAPH KOTO
+            | ["\u3105" - "\u312F"] // Lo  [43] BOPOMOFO LETTER B..BOPOMOFO LETTER NN
+            | ["\u3131" - "\u318E"] // Lo  [94] HANGUL LETTER KIYEOK..HANGUL LETTER ARAEAE
+            | ["\u31A0" - "\u31BF"] // Lo  [32] BOPOMOFO LETTER BU..BOPOMOFO LETTER AH
+            | ["\u31F0" - "\u31FF"] // Lo  [16] KATAKANA LETTER SMALL KU..KATAKANA LETTER SMALL RO
+            | ["\u3400" - "\u4DBF"] // Lo [6592] CJK UNIFIED IDEOGRAPH-3400..CJK UNIFIED IDEOGRAPH-4DBF
+            | ["\u4E00" - "\uA014"] // Lo [21013] CJK UNIFIED IDEOGRAPH-4E00..YI SYLLABLE E
+            | "\uA015" // Lm       YI SYLLABLE WU
+            | ["\uA016" - "\uA48C"] // Lo [1143] YI SYLLABLE BIT..YI SYLLABLE YYR
+            | ["\uA4D0" - "\uA4F7"] // Lo  [40] LISU LETTER BA..LISU LETTER OE
+            | ["\uA4F8" - "\uA4FD"] // Lm   [6] LISU LETTER TONE MYA TI..LISU LETTER TONE MYA JEU
+            | ["\uA500" - "\uA60B"] // Lo [268] VAI SYLLABLE EE..VAI SYLLABLE NG
+            | "\uA60C" // Lm       VAI SYLLABLE LENGTHENER
+            | ["\uA610" - "\uA61F"] // Lo  [16] VAI SYLLABLE NDOLE FA..VAI SYMBOL JONG
+            | ["\uA62A" - "\uA62B"] // Lo   [2] VAI SYLLABLE NDOLE MA..VAI SYLLABLE NDOLE DO
+            | ["\uA640" - "\uA66D"] // L&  [46] CYRILLIC CAPITAL LETTER ZEMLYA..CYRILLIC SMALL LETTER DOUBLE MONOCULAR O
+            | "\uA66E" // Lo       CYRILLIC LETTER MULTIOCULAR O
+            | "\uA67F" // Lm       CYRILLIC PAYEROK
+            | ["\uA680" - "\uA69B"] // L&  [28] CYRILLIC CAPITAL LETTER DWE..CYRILLIC SMALL LETTER CROSSED O
+            | ["\uA69C" - "\uA69D"] // Lm   [2] MODIFIER LETTER CYRILLIC HARD SIGN..MODIFIER LETTER CYRILLIC SOFT SIGN
+            | ["\uA6A0" - "\uA6E5"] // Lo  [70] BAMUM LETTER A..BAMUM LETTER KI
+            | ["\uA6E6" - "\uA6EF"] // Nl  [10] BAMUM LETTER MO..BAMUM LETTER KOGHOM
+            | ["\uA717" - "\uA71F"] // Lm   [9] MODIFIER LETTER DOT VERTICAL BAR..MODIFIER LETTER LOW INVERTED EXCLAMATION MARK
+            | ["\uA722" - "\uA76F"] // L&  [78] LATIN CAPITAL LETTER EGYPTOLOGICAL ALEF..LATIN SMALL LETTER CON
+            | "\uA770" // Lm       MODIFIER LETTER US
+            | ["\uA771" - "\uA787"] // L&  [23] LATIN SMALL LETTER DUM..LATIN SMALL LETTER INSULAR T
+            | "\uA788" // Lm       MODIFIER LETTER LOW CIRCUMFLEX ACCENT
+            | ["\uA78B" - "\uA78E"] // L&   [4] LATIN CAPITAL LETTER SALTILLO..LATIN SMALL LETTER L WITH RETROFLEX HOOK AND BELT
+            | "\uA78F" // Lo       LATIN LETTER SINOLOGICAL DOT
+            | ["\uA790" - "\uA7CA"] // L&  [59] LATIN CAPITAL LETTER N WITH DESCENDER..LATIN SMALL LETTER S WITH SHORT STROKE OVERLAY
+            | ["\uA7D0" - "\uA7D1"] // L&   [2] LATIN CAPITAL LETTER CLOSED INSULAR G..LATIN SMALL LETTER CLOSED INSULAR G
+            | "\uA7D3" // L&       LATIN SMALL LETTER DOUBLE THORN
+            | ["\uA7D5" - "\uA7D9"] // L&   [5] LATIN SMALL LETTER DOUBLE WYNN..LATIN SMALL LETTER SIGMOID S
+            | ["\uA7F2" - "\uA7F4"] // Lm   [3] MODIFIER LETTER CAPITAL C..MODIFIER LETTER CAPITAL Q
+            | ["\uA7F5" - "\uA7F6"] // L&   [2] LATIN CAPITAL LETTER REVERSED HALF H..LATIN SMALL LETTER REVERSED HALF H
+            | "\uA7F7" // Lo       LATIN EPIGRAPHIC LETTER SIDEWAYS I
+            | ["\uA7F8" - "\uA7F9"] // Lm   [2] MODIFIER LETTER CAPITAL H WITH STROKE..MODIFIER LETTER SMALL LIGATURE OE
+            | "\uA7FA" // L&       LATIN LETTER SMALL CAPITAL TURNED M
+            | ["\uA7FB" - "\uA801"] // Lo   [7] LATIN EPIGRAPHIC LETTER REVERSED F..SYLOTI NAGRI LETTER I
+            | ["\uA803" - "\uA805"] // Lo   [3] SYLOTI NAGRI LETTER U..SYLOTI NAGRI LETTER O
+            | ["\uA807" - "\uA80A"] // Lo   [4] SYLOTI NAGRI LETTER KO..SYLOTI NAGRI LETTER GHO
+            | ["\uA80C" - "\uA822"] // Lo  [23] SYLOTI NAGRI LETTER CO..SYLOTI NAGRI LETTER HO
+            | ["\uA840" - "\uA873"] // Lo  [52] PHAGS-PA LETTER KA..PHAGS-PA LETTER CANDRABINDU
+            | ["\uA882" - "\uA8B3"] // Lo  [50] SAURASHTRA LETTER A..SAURASHTRA LETTER LLA
+            | ["\uA8F2" - "\uA8F7"] // Lo   [6] DEVANAGARI SIGN SPACING CANDRABINDU..DEVANAGARI SIGN CANDRABINDU AVAGRAHA
+            | "\uA8FB" // Lo       DEVANAGARI HEADSTROKE
+            | ["\uA8FD" - "\uA8FE"] // Lo   [2] DEVANAGARI JAIN OM..DEVANAGARI LETTER AY
+            | ["\uA90A" - "\uA925"] // Lo  [28] KAYAH LI LETTER KA..KAYAH LI LETTER OO
+            | ["\uA930" - "\uA946"] // Lo  [23] REJANG LETTER KA..REJANG LETTER A
+            | ["\uA960" - "\uA97C"] // Lo  [29] HANGUL CHOSEONG TIKEUT-MIEUM..HANGUL CHOSEONG SSANGYEORINHIEUH
+            | ["\uA984" - "\uA9B2"] // Lo  [47] JAVANESE LETTER A..JAVANESE LETTER HA
+            | "\uA9CF" // Lm       JAVANESE PANGRANGKEP
+            | ["\uA9E0" - "\uA9E4"] // Lo   [5] MYANMAR LETTER SHAN GHA..MYANMAR LETTER SHAN BHA
+            | "\uA9E6" // Lm       MYANMAR MODIFIER LETTER SHAN REDUPLICATION
+            | ["\uA9E7" - "\uA9EF"] // Lo   [9] MYANMAR LETTER TAI LAING NYA..MYANMAR LETTER TAI LAING NNA
+            | ["\uA9FA" - "\uA9FE"] // Lo   [5] MYANMAR LETTER TAI LAING LLA..MYANMAR LETTER TAI LAING BHA
+            | ["\uAA00" - "\uAA28"] // Lo  [41] CHAM LETTER A..CHAM LETTER HA
+            | ["\uAA40" - "\uAA42"] // Lo   [3] CHAM LETTER FINAL K..CHAM LETTER FINAL NG
+            | ["\uAA44" - "\uAA4B"] // Lo   [8] CHAM LETTER FINAL CH..CHAM LETTER FINAL SS
+            | ["\uAA60" - "\uAA6F"] // Lo  [16] MYANMAR LETTER KHAMTI GA..MYANMAR LETTER KHAMTI FA
+            | "\uAA70" // Lm       MYANMAR MODIFIER LETTER KHAMTI REDUPLICATION
+            | ["\uAA71" - "\uAA76"] // Lo   [6] MYANMAR LETTER KHAMTI XA..MYANMAR LOGOGRAM KHAMTI HM
+            | "\uAA7A" // Lo       MYANMAR LETTER AITON RA
+            | ["\uAA7E" - "\uAAAF"] // Lo  [50] MYANMAR LETTER SHWE PALAUNG CHA..TAI VIET LETTER HIGH O
+            | "\uAAB1" // Lo       TAI VIET VOWEL AA
+            | ["\uAAB5" - "\uAAB6"] // Lo   [2] TAI VIET VOWEL E..TAI VIET VOWEL O
+            | ["\uAAB9" - "\uAABD"] // Lo   [5] TAI VIET VOWEL UEA..TAI VIET VOWEL AN
+            | "\uAAC0" // Lo       TAI VIET TONE MAI NUENG
+            | "\uAAC2" // Lo       TAI VIET TONE MAI SONG
+            | ["\uAADB" - "\uAADC"] // Lo   [2] TAI VIET SYMBOL KON..TAI VIET SYMBOL NUENG
+            | "\uAADD" // Lm       TAI VIET SYMBOL SAM
+            | ["\uAAE0" - "\uAAEA"] // Lo  [11] MEETEI MAYEK LETTER E..MEETEI MAYEK LETTER SSA
+            | "\uAAF2" // Lo       MEETEI MAYEK ANJI
+            | ["\uAAF3" - "\uAAF4"] // Lm   [2] MEETEI MAYEK SYLLABLE REPETITION MARK..MEETEI MAYEK WORD REPETITION MARK
+            | ["\uAB01" - "\uAB06"] // Lo   [6] ETHIOPIC SYLLABLE TTHU..ETHIOPIC SYLLABLE TTHO
+            | ["\uAB09" - "\uAB0E"] // Lo   [6] ETHIOPIC SYLLABLE DDHU..ETHIOPIC SYLLABLE DDHO
+            | ["\uAB11" - "\uAB16"] // Lo   [6] ETHIOPIC SYLLABLE DZU..ETHIOPIC SYLLABLE DZO
+            | ["\uAB20" - "\uAB26"] // Lo   [7] ETHIOPIC SYLLABLE CCHHA..ETHIOPIC SYLLABLE CCHHO
+            | ["\uAB28" - "\uAB2E"] // Lo   [7] ETHIOPIC SYLLABLE BBA..ETHIOPIC SYLLABLE BBO
+            | ["\uAB30" - "\uAB5A"] // L&  [43] LATIN SMALL LETTER BARRED ALPHA..LATIN SMALL LETTER Y WITH SHORT RIGHT LEG
+            | ["\uAB5C" - "\uAB5F"] // Lm   [4] MODIFIER LETTER SMALL HENG..MODIFIER LETTER SMALL U WITH LEFT HOOK
+            | ["\uAB60" - "\uAB68"] // L&   [9] LATIN SMALL LETTER SAKHA YAT..LATIN SMALL LETTER TURNED R WITH MIDDLE TILDE
+            | "\uAB69" // Lm       MODIFIER LETTER SMALL TURNED W
+            | ["\uAB70" - "\uABBF"] // L&  [80] CHEROKEE SMALL LETTER A..CHEROKEE SMALL LETTER YA
+            | ["\uABC0" - "\uABE2"] // Lo  [35] MEETEI MAYEK LETTER KOK..MEETEI MAYEK LETTER I LONSUM
+            | ["\uAC00" - "\uD7A3"] // Lo [11172] HANGUL SYLLABLE GA..HANGUL SYLLABLE HIH
+            | ["\uD7B0" - "\uD7C6"] // Lo  [23] HANGUL JUNGSEONG O-YEO..HANGUL JUNGSEONG ARAEA-E
+            | ["\uD7CB" - "\uD7FB"] // Lo  [49] HANGUL JONGSEONG NIEUN-RIEUL..HANGUL JONGSEONG PHIEUPH-THIEUTH
+            | ["\uF900" - "\uFA6D"] // Lo [366] CJK COMPATIBILITY IDEOGRAPH-F900..CJK COMPATIBILITY IDEOGRAPH-FA6D
+            | ["\uFA70" - "\uFAD9"] // Lo [106] CJK COMPATIBILITY IDEOGRAPH-FA70..CJK COMPATIBILITY IDEOGRAPH-FAD9
+            | ["\uFB00" - "\uFB06"] // L&   [7] LATIN SMALL LIGATURE FF..LATIN SMALL LIGATURE ST
+            | ["\uFB13" - "\uFB17"] // L&   [5] ARMENIAN SMALL LIGATURE MEN NOW..ARMENIAN SMALL LIGATURE MEN XEH
+            | "\uFB1D" // Lo       HEBREW LETTER YOD WITH HIRIQ
+            | ["\uFB1F" - "\uFB28"] // Lo  [10] HEBREW LIGATURE YIDDISH YOD YOD PATAH..HEBREW LETTER WIDE TAV
+            | ["\uFB2A" - "\uFB36"] // Lo  [13] HEBREW LETTER SHIN WITH SHIN DOT..HEBREW LETTER ZAYIN WITH DAGESH
+            | ["\uFB38" - "\uFB3C"] // Lo   [5] HEBREW LETTER TET WITH DAGESH..HEBREW LETTER LAMED WITH DAGESH
+            | "\uFB3E" // Lo       HEBREW LETTER MEM WITH DAGESH
+            | ["\uFB40" - "\uFB41"] // Lo   [2] HEBREW LETTER NUN WITH DAGESH..HEBREW LETTER SAMEKH WITH DAGESH
+            | ["\uFB43" - "\uFB44"] // Lo   [2] HEBREW LETTER FINAL PE WITH DAGESH..HEBREW LETTER PE WITH DAGESH
+            | ["\uFB46" - "\uFBB1"] // Lo [108] HEBREW LETTER TSADI WITH DAGESH..ARABIC LETTER YEH BARREE WITH HAMZA ABOVE FINAL FORM
+            | ["\uFBD3" - "\uFD3D"] // Lo [363] ARABIC LETTER NG ISOLATED FORM..ARABIC LIGATURE ALEF WITH FATHATAN ISOLATED FORM
+            | ["\uFD50" - "\uFD8F"] // Lo  [64] ARABIC LIGATURE TEH WITH JEEM WITH MEEM INITIAL FORM..ARABIC LIGATURE MEEM WITH KHAH WITH MEEM INITIAL FORM
+            | ["\uFD92" - "\uFDC7"] // Lo  [54] ARABIC LIGATURE MEEM WITH JEEM WITH KHAH INITIAL FORM..ARABIC LIGATURE NOON WITH JEEM WITH YEH FINAL FORM
+            | ["\uFDF0" - "\uFDFB"] // Lo  [12] ARABIC LIGATURE SALLA USED AS KORANIC STOP SIGN ISOLATED FORM..ARABIC LIGATURE JALLAJALALOUHOU
+            | ["\uFE70" - "\uFE74"] // Lo   [5] ARABIC FATHATAN ISOLATED FORM..ARABIC KASRATAN ISOLATED FORM
+            | ["\uFE76" - "\uFEFC"] // Lo [135] ARABIC FATHA ISOLATED FORM..ARABIC LIGATURE LAM WITH ALEF FINAL FORM
+            | ["\uFF21" - "\uFF3A"] // L&  [26] FULLWIDTH LATIN CAPITAL LETTER A..FULLWIDTH LATIN CAPITAL LETTER Z
+            | ["\uFF41" - "\uFF5A"] // L&  [26] FULLWIDTH LATIN SMALL LETTER A..FULLWIDTH LATIN SMALL LETTER Z
+            | ["\uFF66" - "\uFF6F"] // Lo  [10] HALFWIDTH KATAKANA LETTER WO..HALFWIDTH KATAKANA LETTER SMALL TU
+            | "\uFF70" // Lm       HALFWIDTH KATAKANA-HIRAGANA PROLONGED SOUND MARK
+            | ["\uFF71" - "\uFF9D"] // Lo  [45] HALFWIDTH KATAKANA LETTER A..HALFWIDTH KATAKANA LETTER N
+            | ["\uFF9E" - "\uFF9F"] // Lm   [2] HALFWIDTH KATAKANA VOICED SOUND MARK..HALFWIDTH KATAKANA SEMI-VOICED SOUND MARK
+            | ["\uFFA0" - "\uFFBE"] // Lo  [31] HALFWIDTH HANGUL FILLER..HALFWIDTH HANGUL LETTER HIEUH
+            | ["\uFFC2" - "\uFFC7"] // Lo   [6] HALFWIDTH HANGUL LETTER A..HALFWIDTH HANGUL LETTER E
+            | ["\uFFCA" - "\uFFCF"] // Lo   [6] HALFWIDTH HANGUL LETTER YEO..HALFWIDTH HANGUL LETTER OE
+            | ["\uFFD2" - "\uFFD7"] // Lo   [6] HALFWIDTH HANGUL LETTER YO..HALFWIDTH HANGUL LETTER YU
+            | ["\uFFDA" - "\uFFDC"] // Lo   [3] HALFWIDTH HANGUL LETTER EU..HALFWIDTH HANGUL LETTER I
+            | "_" >
+| <#ID_CONTINUE: <ID_START> | <DIGIT> >
+}
+
+SKIP: {
+  <SPACE: " " | "\t">
+  // Here and for all other places where we match newline,
+  // it is not necessary to separately match the combined
+  // versions like "\n\r". This is ok because interpreting
+  // the second character as a separate newline is always
+  // fine because blank lines are ignored.
+| <SKIPPED_NEWLINE: "\n" | "\r"> {
+    if (openParenCounter() == 0) {
+      SwitchTo(NEWLINE_EMIT);
+    }
+  }
+| <LINE_JOIN: "\\" ("\n" | "\r" | "\r\n")>
+}
+
+SPECIAL_TOKEN: {
+  <COMMENT: "#" (~["\n", "\r"])*>
+}
+
+
+<INDENT_CHECK> SPECIAL_TOKEN: {
+  <INDENT_CHECK_COMMENT: "#" (~["\n", "\r"])*>
+}
+
+<INDENT_CHECK> SKIP: {
+  <INDENT_CHECK_SPACE: " "> { currentIndent += 1; }
+| <INDENT_CHECK_TAB: "\t">  { currentIndent = currentIndent / 8 + 8; }
+| <INDENT_CHECK_NEWLINE: "\n" | "\r"> { currentIndent = 0; }
+| <INDENT_CHECK_END: ~[]> {
+    // Rewind input stream by the one consumed character because we dont
+    // really wont to skip it. We just used it as the end marker for the
+    // indentation check. The documentation says input_stream is read only
+    // so we are a little bit of the beaten path here but so far it works.
+    input_stream.backup(1);
+
+    int lastIndent = indentStack.peek();
+    if (currentIndent > lastIndent) {
+      indentStack.push(currentIndent);
+      SwitchTo(INDENT_EMIT);
+    } else if (currentIndent < lastIndent) {
+      assert(dedentsToEmit == 0);
+
+      while (currentIndent < lastIndent) {
+        dedentsToEmit += 1;
+        indentStack.pop();
+        lastIndent = indentStack.peek();
+      }
+
+      if (currentIndent == lastIndent) {
+        SwitchTo(DEDENT_EMIT);
+      } else {
+        SwitchTo(MISSDENT_EMIT);
+      }
+    } else {
+      SwitchTo(DEFAULT);
+    }
+    currentIndent = 0;
+  }
+}
+
+<MISSDENT_EMIT> TOKEN: {
+  // Defining this as ""|"" causes javaCC to produce better readable debug output
+  // in the form a proper tokenImage string <MISSDENT> instead of "". This has no
+  // impact on the generated matching code in the state.
+  <MISSINDENT: "" | ""> {
+      SwitchTo(DEFAULT);
+  }
+}
+
+<INDENT_EMIT> TOKEN: {
+  // Defining this as ""|"" causes javaCC to produce better readable debug output
+  // in the form a proper tokenImage string <INDENT> instead of "". This has no
+  // impact on the generated matching code in the state.
+  <INDENT: "" | ""> {
+      SwitchTo(DEFAULT);
+  }
+}
+
+<DEDENT_EMIT> TOKEN: {
+  // Defining this as ""|"" causes javaCC to produce better readable debug output
+  // in the form a proper tokenImage string <DEDENT> instead of "". This has no
+  // impact on the generated matching code in the state.
+  <DEDENT: "" | ""> {
+      dedentsToEmit -= 1;
+      if (dedentsToEmit == 0) {
+        SwitchTo(DEFAULT);
+      }
+      // This disables the build in infinite loop detection.
+      // We take care of not looping forever by decrementing
+      // dedentsToEmit.
+      jjbeenHere[DEDENT_EMIT] = false;
+  }
+}
+
+<NEWLINE_EMIT> TOKEN: {
+  // Defining this as ""|"" causes javaCC to produce better readable debug output
+  // in the form a proper tokenImage string <NEWLINE> instead of "". This has no
+  // impact on the generated matching code in the state.
+  <NEWLINE: "" | ""> {
+    SwitchTo(INDENT_CHECK);
+  }
+}
+
+///////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////
+// String lexer rules:
+///////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////
+TOKEN: {
+  <STRING_PREFIX:
+  ("r" | "R" | "b" | "B" | "u" | "U")
+  ("\"" | "'" | "\"\"\"" | "'''")> {
+    matchedToken.image = adjustTokenAndBackupInput(matchedToken, 1);
+  }
+| <STRING_PREFIX2:
+  ("rb" | "rB" | "Rb" | "RB" | "br" | "bR" | "Br" | "BR" | "ur" | "uR" | "Ur" | "UR")
+  ("\"" | "'" | "\"\"\"" | "'''")> {
+    matchedToken.image = adjustTokenAndBackupInput(matchedToken, 2);
+    matchedToken.kind = STRING_PREFIX;
+  }
+| <FORMAT_STRING_PREFIX:
+  ("f" | "F")
+  ("\"" | "'" | "\"\"\"" | "'''")> {
+    matchedToken.image = adjustTokenAndBackupInput(matchedToken, 1);
+  } : FORMAT_STRING_LEX
+| <FORMAT_STRING_PREFIX2:
+  ("rf" | "rF" | "Rf" | "RF" | "fr" | "fR" | "Fr" | "FR")
+  ("\"" | "'" | "\"\"\"" | "'''")> {
+    matchedToken.image = adjustTokenAndBackupInput(matchedToken, 2);
+    matchedToken.kind = FORMAT_STRING_PREFIX;
+  } : FORMAT_STRING_LEX
+}
+
+///////////////////////////////////////////////////////////////////////////////
+// Normal string lexer rules:
+///////////////////////////////////////////////////////////////////////////////
+
+// The lexer state NEVER is never reached. We use it only to define common lexer token kinds
+// to which the different string lexer map to provide a uniform interface to the parsing stage.
+<NEVER> TOKEN: {
+  <STRING_QUOTE_OPEN: "STRING_QUOTE_OPEN">
+| <STRING_CONTENT: "STRING_CONTENT">
+}
+
+// NSDQ stands for: normal single double quote
+// NSSQ stands for: normal single single quote
+// NTDQ stands for: normal triple double quote
+// NTSQ stands for: normal single double quote
+TOKEN: {
+  <NSDQ_QUOTE_OPEN: "\"" > { matchedToken.kind = STRING_QUOTE_OPEN; }: NSDQ_LEX
+| <NSSQ_QUOTE_OPEN: "'"> { matchedToken.kind = STRING_QUOTE_OPEN; }: NSSQ_LEX
+| <NTDQ_QUOTE_OPEN: "\"\"\""> { matchedToken.kind = STRING_QUOTE_OPEN; }: NTDQ_LEX
+| <NTSQ_QUOTE_OPEN: "'''"> { matchedToken.kind = STRING_QUOTE_OPEN; }: NTSQ_LEX
+}
+
+<NSDQ_LEX> TOKEN: {
+  <NSDQ_CONTENT: "\""> {
+    matchedToken.image = cutContentTokenImage(matchedToken, 1);
+    matchedToken.kind = STRING_CONTENT;
+  }: DEFAULT
+}
+<NSDQ_LEX> MORE: {
+  <NSDQ_ESCAPED_ESCAPE: "\\\\">
+| <NSDQ_ESCAPED_QUOTE: "\\\"">
+| <NSDQ_ANY: ~[]>
+}
+
+<NSSQ_LEX> TOKEN: {
+  <NSSQ_CONTENT: "'"> {
+    matchedToken.image = cutContentTokenImage(matchedToken, 1);
+    matchedToken.kind = STRING_CONTENT;
+  }: DEFAULT
+}
+<NSSQ_LEX> MORE: {
+  <NSSQ_ESCAPED_ESCAPE: "\\\\">
+| <NSSQ_ESCAPED_QUOTE: "\\'">
+| <NSSQ_ANY: ~[]>
+}
+
+<NTDQ_LEX> TOKEN: {
+  <NTDQ_CONTENT: "\"\"\""> {
+    matchedToken.image = cutContentTokenImage(matchedToken, 3);
+    matchedToken.kind = STRING_CONTENT;
+  }: DEFAULT
+}
+<NTDQ_LEX> MORE: {
+  <NTDQ_ESCAPED_ESCAPE: "\\\\">
+| <NTDQ_ESCAPED_QUOTE: "\\\"">
+| <NTDQ_ANY: ~[]>
+}
+
+<NTSQ_LEX> TOKEN: {
+  <NTSQ_CONTENT: "'''"> {
+    matchedToken.image = cutContentTokenImage(matchedToken, 3);
+    matchedToken.kind = STRING_CONTENT;
+  }: DEFAULT
+}
+<NTSQ_LEX> MORE: {
+  <NTSQ_ESCAPED_ESCAPE: "\\\\">
+| <NTSQ_ESCAPED_QUOTE: "\\'">
+| <NTSQ_ANY: ~[]>
+}
+
+
+///////////////////////////////////////////////////////////////////////////////
+// Format string lexer rules:
+///////////////////////////////////////////////////////////////////////////////
+// TODO currently we parse format specs as one single string and do not break it down in its elements.
+<FORMAT_SPEC_LEX> MORE: {
+  <FORMAT_SPEC_CURLY_OPEN: "{"> {
+    formatSpecOpenCurly += 1;
+  }
+| <FORMAT_SPEC_CURLY_CLOSE: "}"> {
+    formatSpecOpenCurly -= 1;
+    if (formatSpecOpenCurly < 0) {
+      formatSpecOpenCurly = 0;
+      SwitchTo(FORMAT_SPEC_LEX_EMIT);
+    }
+  }
+| <FORMAT_SPEC_ANY: ~[]>
+}
+<FORMAT_SPEC_LEX_EMIT> TOKEN: {
+  <FORMAT_SPEC: ""> {
+    // We get here with an already matched closing curly bracket for the entire replacement
+    // field. Thus we need to cut the token image by one to remove the closing curly bracket
+    // and also we backup the input stream by one in order to generate a separate token for
+    // it in DEFAULT state to indicate the replacement field end.
+    matchedToken.image = matchedToken.image.substring(0, matchedToken.image.length() - 1);
+    input_stream.backup(1);
+  }: DEFAULT
+}
+
+// The lexer state NEVER is never reached. We use it only to define common lexer token kinds
+// to which the different string lexer map to provide a uniform interface to the parsing stage.
+<NEVER> TOKEN: {
+  <FORMAT_STRING_QUOTE_OPEN: "FORMAT_STRING_QUOTE_OPEN">
+| <FORMAT_STRING_CONTENT: "FORMAT_STRING_CONTENT">
+| <FORMAT_STRING_QUOTE_CLOSE: "FORMAT_STRING_QUOTE_CLOSE">
+| <FORMAT_STRING_CURLY_OPEN: "FORMAT_STRING_CURLY_OPEN">
+}
+
+// FSDQ stands for: formatted single double quote
+// FSSQ stands for: formatted single single quote
+// FTDQ stands for: formatted triple double quote
+// FTSQ stands for: formatted triple single quote
+<FORMAT_STRING_LEX> TOKEN: {
+  <FSDQ_QUOTE_OPEN: "\""> { formatStringLexStateStack.push(FSDQ_LEX); matchedToken.kind = FORMAT_STRING_QUOTE_OPEN; }: FSDQ_LEX
+| <FSSQ_QUOTE_OPEN: "'"> { formatStringLexStateStack.push(FSSQ_LEX); matchedToken.kind = FORMAT_STRING_QUOTE_OPEN; }: FSSQ_LEX
+| <FTDQ_QUOTE_OPEN: "\"\"\""> { formatStringLexStateStack.push(FTDQ_LEX); matchedToken.kind = FORMAT_STRING_QUOTE_OPEN; }: FTDQ_LEX
+| <FTSQ_QUOTE_OPEN: "'''"> { formatStringLexStateStack.push(FTSQ_LEX); matchedToken.kind = FORMAT_STRING_QUOTE_OPEN; }: FTSQ_LEX
+}
+
+<FSDQ_LEX> TOKEN: {
+  <FSDQ_CONTENT: "{" | "\"" > {
+    matchedToken.image = cutContentTokenImageAndBackupInput(matchedToken, "{", "\"");
+    matchedToken.kind = FORMAT_STRING_CONTENT;
+  }: FSDQ_LEX_EMIT_END
+}
+<FSDQ_LEX> MORE: {
+  <FSDQ_ESCAPED_ESCAPE: "\\\\">
+| <FSDQ_ESCAPED_QUOTE: "\\\"">
+| <FSDQ_ESCAPED_CURLY: "{{">
+| <FSDQ_ANY: ~[]>
+}
+<FSDQ_LEX_EMIT_END> TOKEN: {
+  <FSDQ_CURLY_OPEN: "{"> {
+   matchedToken.kind = FORMAT_STRING_CURLY_OPEN;
+   pushParenScope();
+   countOpenParen();
+  }: DEFAULT
+| <FSDQ_END: "\""> { formatStringLexStateStack.pop(); matchedToken.kind = FORMAT_STRING_QUOTE_CLOSE; }: DEFAULT
+}
+
+<FSSQ_LEX> TOKEN: {
+  <FSSQ_CONTENT: "{" | "'" > {
+    matchedToken.image = cutContentTokenImageAndBackupInput(matchedToken, "{", "'");
+    matchedToken.kind = FORMAT_STRING_CONTENT;
+  }: FSSQ_LEX_EMIT_END
+}
+<FSSQ_LEX> MORE: {
+  <FSSQ_ESCAPED_ESCAPE: "\\\\">
+| <FSSQ_ESCAPED_QUOTE: "\\'">
+| <FSSQ_ESCAPED_CURLY: "{{">
+| <FSSQ_ANY: ~[]>
+}
+<FSSQ_LEX_EMIT_END> TOKEN: {
+  <FSSQ_CURLY_OPEN: "{"> {
+   matchedToken.kind = FORMAT_STRING_CURLY_OPEN;
+   pushParenScope();
+   countOpenParen();
+  }: DEFAULT
+| <FSSQ_END: "'"> { formatStringLexStateStack.pop(); matchedToken.kind = FORMAT_STRING_QUOTE_CLOSE; }: DEFAULT
+}
+
+<FTDQ_LEX> TOKEN: {
+  <FTDQ_CONTENT: "{" | "\"\"\"" > {
+    matchedToken.image = cutContentTokenImageAndBackupInput(matchedToken, "{", "\"\"\"");
+    matchedToken.kind = FORMAT_STRING_CONTENT;
+  }: FTDQ_LEX_EMIT_END
+}
+<FTDQ_LEX> MORE: {
+  <FTDQ_ESCAPED_ESCAPE: "\\\\">
+| <FTDQ_ESCAPED_QUOTE: "\\\"">
+| <FTDQ_ESCAPED_CURLY: "{{">
+| <FTDQ_ANY: ~[]>
+}
+<FTDQ_LEX_EMIT_END> TOKEN: {
+  <FTDQ_CURLY_OPEN: "{"> {
+   matchedToken.kind = FORMAT_STRING_CURLY_OPEN;
+   pushParenScope();
+   countOpenParen();
+  }: DEFAULT
+| <FTDQ_END: "\"\"\""> { formatStringLexStateStack.pop(); matchedToken.kind = FORMAT_STRING_QUOTE_CLOSE; }: DEFAULT
+}
+
+<FTSQ_LEX> TOKEN: {
+  <FTSQ_CONTENT: "{" | "'''" > {
+    matchedToken.image = cutContentTokenImageAndBackupInput(matchedToken, "{", "'''");
+    matchedToken.kind = FORMAT_STRING_CONTENT;
+  }: FTSQ_LEX_EMIT_END
+}
+<FTSQ_LEX> MORE: {
+  <FTSQ_ESCAPED_ESCAPE: "\\\\">
+| <FTSQ_ESCAPED_QUOTE: "\\'">
+| <FTSQ_ESCAPED_CURLY: "{{">
+| <FTSQ_ANY: ~[]>
+}
+<FTSQ_LEX_EMIT_END> TOKEN: {
+  <FTSQ_CURLY_OPEN: "{"> {
+   matchedToken.kind = FORMAT_STRING_CURLY_OPEN;
+   pushParenScope();
+   countOpenParen();
+  }: DEFAULT
+| <FTSQ_END: "'''"> { formatStringLexStateStack.pop(); matchedToken.kind = FORMAT_STRING_QUOTE_CLOSE; }: DEFAULT
+}
+
+///////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////
+// Parser rules start:
+///////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////
+// Notes for PythonParser variables:
+// token:
+//  - The current token. Contains chain of all already obtained tokens via .next field.
+// jj_nt:
+//  - Likely full name: next token
+//  - Initialised to null
+//  - Written by jj_ntk_f
+//  - Only used in jj_ntk_f itself to set next jj_ntk.
+//  -> Is redundant as it is defined by token.next at the start of jj_ntk_f
+// jj_ntk:
+//  - Likely full name: next token kind
+//  - Initialised to -1
+//  - Written by jj_ntk_f
+//  - jj_consume_token and getNextToken set it to -1
+//  -> We set this to -1 when we set token
+// jj_scanpos:
+//  - Likely full name: scan position
+//  - Same as jj_lastpos
+// jj_lastpos:
+//  - Likely full name: last position
+//  - Is set to token at entry for each lookahead function jj_2_<X> and by jj_scan_token
+//    which is called below the call tree of the jj_2_<X> functions.
+//  -> Used for lookahead functionality only. Since it at entry of lookahed function we
+//     dont need to handle it.
+// jj_la:
+//  - Likely full name: lookahead
+//  - Used in call tree below generateParseException and jj_scan_token
+//  - Is set at entry for each lookahead function jj_2_<X>.
+//  - Ends up in the gen filed of JJCalls chains.
+//  -> Used for lookahead functionality only. Since it at entry of lookahed function we
+//     dont need to handle it.
+// jj_gen:
+//  - Initialised to zero
+//  - Incremented in jj_consume_token and getNextToken for each token.
+//  - Used/read in call tree below generateParseException and jj_save
+//  -> Unclear if this needs to be touched
+// jj_la1:
+//  - Array size of the number of token switch blocks generated. A token switch block is "switch ((jj_ntk==-1)..."
+//  - In each switch block the default case writes jj_gen to its slot in jj_la1.
+//  - Only realy used/read from in generateParseException
+//  -> Unclear if this needs to be touched
+// jj_la1_<X>:
+//  - Static effective final data arrays. Used in generateParseException
+//  -> Unclear if this needs to be touched
+// jj_2_rtns:
+//  - rtn likely means Recursive Transition Network
+//  - Initialized in PythonParser constructors to an array the size of the amount jj_2_<X> methods.
+//    Each entry at start contains and "empty" JJCalls class/chain.
+//  - Somehow garbage collected in jj_consume_token. GC is controlled by jj_gc
+//  - New elements to the JJCalls chains are added in jj_save
+//  -> Unclear if this needs to be touched
+// jj_rescan:
+//  - Is only true in call tree below jj_rescan_token which is only called from generateParseException
+//  - Used to guard call to jj_add_error_token in jj_scan_token
+// jj_gc:
+//  - Likely full name: GarbageCollectCounter
+//  - Used to trigger some kind of cleanup of JJCalls chains in jj_2_rtns
+// jj_ls:
+//  - Static final variable for jj_scan_token
+// jj_expentries:
+//  - Likely full name: ExpectedEntries
+//  - Used to calculated expected tokens in call tree below generateParseException
+// jj_expentry:
+//  - Likely full name: ExpectedEntry
+//  - Used to calculated expected tokens in call tree below generateParseException
+// jj_kind:
+//  - Used to communicate the token kind of jj_consume_token to generateParseException
+// jj_lasttokens:
+//  - Internal state for jj_add_error_token
+// jj_endpos:
+//  - Used in call tree below generateParseException as index into jj_lasttokens and
+//    as limit to iterate over jj_expentry
+
+Module module(): {
+  ArrayList<istmt> allStmts = new ArrayList<istmt>();
+  ArrayList<istmt> stmts;
+} {
+  try {
+    (
+      stmts = statementsAndDedentOrEof() { allStmts.addAll(stmts); }
+    | <EOF>
+    )
+    { return new Module(allStmts, new ArrayList<TypeIgnore>()); }
+  } catch (ParseException exception) {
+    ErrorStatement errorStmt = recoverAndCreateErrorStmt(token, exception);
+    allStmts.add(errorStmt);
+    if (token.kind != EOF) {
+      ArrayList<istmt> postRecoverStmts = statementsAndDedentOrEof();
+      allStmts.addAll(postRecoverStmts);
+    }
+    return new Module(allStmts, new ArrayList<TypeIgnore>());
+  }
+}
+
+// This is the "statements" rule from the CPython 3.9 grammar with a modification:
+// Also consume the <DEDENT> or <EOF> which must follow.
+// We do this for easy of error handling.
+ArrayList<istmt> statementsAndDedentOrEof(): {
+  ArrayList<istmt> allStmts = new ArrayList<istmt>();
+  ArrayList<istmt> simpleStmts;
+  istmt stmt;
+} {
+  try {
+    (
+      stmt = compoundStatement() { allStmts.add(stmt); }
+    | simpleStmts = simpleStatement() { allStmts.addAll(simpleStmts); }
+    )+
+    (<DEDENT> | <EOF>)
+    { return allStmts; }
+  } catch (ParseException exception) {
+    ErrorStatement errorStmt = recoverAndCreateErrorStmt(token, exception);
+    allStmts.add(errorStmt);
+    if (token.kind != EOF) {
+      ArrayList<istmt> postRecoverStmts = statementsAndDedentOrEof();
+      allStmts.addAll(postRecoverStmts);
+    }
+    return allStmts;
+  }
+}
+
+// Error handling strategy:
+// In case of a parse exception we search in the token stream for the next
+// <SEMICOLON>, <NEWLINE> or <EOF> and than return the so far parsed statements.
+// To not return "accidental" statements, a small statement is considered pending
+// until a following <SEMICOLON>, <NEWLINE> or <EOF> was parsed.
+// An "accidental" statement would be the "x" in "x y = 1". At first we successfully
+// parse a <NAME> and after that we are missing a ";" or got one "y" too much. But
+// only in the first case returning an "x" statement would be ok and since we dont
+// know that we rather not return anything that was not terminated by the above
+// special characters.
+ArrayList<istmt> simpleStatement(): {
+  istmt pendingStmt = null;
+  ArrayList<istmt> stmts = new ArrayList<istmt>();
+  Token reparseStartToken = null;
+} {
+  try {
+    { reparseStartToken = token; }
+    (pendingStmt = smallStatement())
+    (LOOKAHEAD(2)
+      <SEMICOLON>
+      { reparseStartToken = token;
+        if (pendingStmt != null) stmts.add(pendingStmt);
+        pendingStmt = null;
+      }
+      pendingStmt = smallStatement()
+    )*
+    (
+      <SEMICOLON>
+      {
+        if (pendingStmt != null) stmts.add(pendingStmt);
+        pendingStmt = null;
+      }
+    )?
+    (<NEWLINE>|<EOF>)
+    {
+      if (pendingStmt != null) stmts.add(pendingStmt);
+      return stmts;
+    }
+  } catch (ParseException exception) {
+    Token lastCorrectToken = token;
+    try {
+      token = reparseStartToken;
+      setCurrentToken(reparseStartToken);
+      Name name = name();
+
+      // We now test for parse alternatives which would either require a hugh
+      // "factor out" effort or are not expressible at all with an LL(k) parser.
+      // This means we need to reparse some of the input and thus give up on
+      // strict linear time parsing but in practice the observed performance is
+      // quite good since this only affects a usually small part of the input.
+      if (name.id().equals("print")) {
+        // We got a parsing failure after a "print" Name expression.
+        // Try to interpret as python2 print statement.
+        istmt printStmt = printStatementPython2(name);
+        stmts.add(printStmt);
+        return stmts;
+      } else if (name.id().equals("exec")) {
+        // We got a parsing failure after a "exec" Name expression.
+        // Try to interpret as python2 exec statement.
+        istmt execStmt = execStatementPython2(name);
+        stmts.add(execStmt);
+        return stmts;
+      } else if (name.id().equals("match")) {
+        Match matchStmt = matchStmt(name);
+        stmts.add(matchStmt);
+        return stmts;
+      }
+    } catch (ParseException printException) {
+      // If something goes wrong trying to parse as python2 or match
+      // statement, we can rely on the error recovery already for
+      // the initial parse error.
+    }
+
+    setCurrentToken(lastCorrectToken);
+    ErrorStatement errorStmt = recoverAndCreateErrorStmt(lastCorrectToken, exception);
+    stmts.add(errorStmt);
+    // We do not need to recursively invoke simpleStatement() here because the surrounding
+    // rule does that already.
+    return stmts;
+  }
+}
+
+Name name(): {
+
+} {
+  <NAME> { return new Name(token.image, attributes(token, token)); }
+}
+
+// printName is the already parsed "print" Name expression.
+// Since this rule is only expected to be called in error
+// recovery, it needs to consume trailing semicolons and
+// newline to finish the simpleStatement context and
+// allow normal parsing to continue.
+istmt printStatementPython2(Name printName): {
+  iexpr expr;
+  ArrayList<iexpr> arguments = new ArrayList<iexpr>();
+} {
+  expr = expression() { arguments.add(expr); }
+  (LOOKAHEAD(2)
+    <COMMA>
+    expr = expression() { arguments.add(expr); }
+  )*
+  (<COMMA>)*
+  (
+    (<SEMICOLON> (<NEWLINE> | <EOF>)?)
+  | <NEWLINE>
+  | <EOF>
+  )
+  {
+    return new Expr(
+      new Call(printName, arguments, new ArrayList<Keyword>(), attributes(printName, token)));
+  }
+}
+
+// execName is the already parsed "exec" Name expression.
+// Since this rule is only expected to be called in error
+// recovery, it needs to consume trailing semicolons and
+// newline to finish the simpleStatement context and
+// allow normal parsing to continue.
+istmt execStatementPython2(Name execName): {
+  iexpr codeExpr;
+  iexpr globalsExpr = null;
+  iexpr localsExpr = null;
+} {
+  codeExpr = bitwiseOr()
+  (
+    <IN>
+    globalsExpr = expression()
+    (
+      <COMMA>
+      localsExpr = expression()
+    )?
+  )?
+  (
+    (<SEMICOLON> (<NEWLINE> | <EOF>)?)
+  | <NEWLINE>
+  | <EOF>
+  )
+  {
+    ArrayList<iexpr> arguments = new ArrayList<iexpr>();
+    arguments.add(codeExpr);
+    if (globalsExpr != null) {
+      arguments.add(globalsExpr);
+    }
+    if (localsExpr != null) {
+      arguments.add(localsExpr);
+    }
+    return new Expr(
+      new Call(execName, arguments, new ArrayList<Keyword>(), attributes(execName, token)));
+  }
+}
+
+iexpr starNamedExpression(): {
+  iexpr expr;
+} {
+  (expr = namedExpression() | expr = starredBitwiseOr())
+  { return expr; }
+}
+
+// "match" is a so called "soft" keyword introduced in Python 3.10.
+// Only in the specific pattern match statment constellation it is
+// considered a keyword and otherwise it is a regular NAME token
+// which means we cannot have something like a MATCH token.
+Match matchStmt(Name matchName): {
+  ArrayList<iexpr> expressions = new ArrayList<>();
+  iexpr subjectExpr;
+  boolean isTuple = false;
+  MatchCase matchCase;
+  ArrayList<MatchCase> cases = new ArrayList<>();
+} {
+  subjectExpr = starNamedExpression() { expressions.add(subjectExpr); }
+  (LOOKAHEAD(2)
+    <COMMA> { isTuple = true; }
+    subjectExpr = starNamedExpression() { expressions.add(subjectExpr); }
+  )*
+  (
+    <COMMA> { isTuple = true; }
+  | {
+      if (expressions == null && subjectExpr instanceof Starred) {
+        throw new ParseException("Single starred subject requires trailing comma.");
+      }
+    }
+  )
+  {
+    if (isTuple) {
+      subjectExpr = new Tuple(expressions, attributes(expressions.get(0), token));
+    }
+  }
+  <COLON>
+  <NEWLINE>
+  <INDENT>
+  (
+    matchCase = caseBlock() { cases.add(matchCase); }
+  )+
+  (<DEDENT> | <EOF>)
+  {
+    return new Match(subjectExpr, cases, attributes(matchName, token));
+  }
+}
+
+MatchCase caseBlock(): {
+  ArrayList<ipattern> patterns = new ArrayList<>();
+  boolean isSequence;
+  Token patternEndToken;
+  iexpr guard = null;
+  ArrayList<istmt> blockStmts;
+} {
+  <NAME> { if (!token.image.equals("case")) throw new ParseException("case keyword expected"); }
+  isSequence = groupOrSequenceCore(patterns) { patternEndToken = token; }
+  (guard = guard())?
+  <COLON>
+  blockStmts = block()
+  {
+    ipattern pattern;
+    if (isSequence) {
+      pattern = new MatchSequence(patterns, attributes(patterns.get(0), patternEndToken));
+    } else {
+      pattern = patterns.get(0);
+    }
+    return new MatchCase(pattern, guard, blockStmts);
+  }
+}
+
+iexpr guard(): {
+  iexpr expr;
+} {
+  <IF> expr = namedExpression() { return expr; }
+}
+
+ipattern pattern(): {
+  ipattern pattern;
+} {
+  pattern = asPattern()
+  { return pattern; }
+}
+
+ipattern asPattern(): {
+  ipattern pattern;
+  String target;
+} {
+  pattern = orPattern()
+  (
+    <AS> target = patternCaptureTarget()
+    {
+      pattern = new MatchAs(pattern, target, attributes(pattern, token));
+    }
+  )?
+  { return pattern; }
+}
+
+ipattern orPattern(): {
+  ipattern pattern;
+  ArrayList<ipattern> patterns = null;
+} {
+  pattern = closedPattern()
+  (
+    <BIT_OR>
+    {
+      if (patterns == null) {
+        patterns = new ArrayList<>();
+        patterns.add(pattern);
+      }
+    }
+    pattern = closedPattern() { patterns.add(pattern); }
+  )*
+  {
+    if (patterns != null) {
+      return new MatchOr(patterns, attributes(patterns.get(0), token));
+    } else {
+      return pattern;
+    }
+  }
+}
+
+ipattern closedPattern(): {
+  ipattern pattern;
+} {
+  (
+    pattern = literalPattern()
+  | pattern = captureOrWildcardOrValueOrClassPattern()
+  | pattern = groupOrSequencePattern()
+  | pattern = mappingPattern()
+  )
+  { return pattern; }
+}
+
+ipattern literalPattern(): {
+  iexpr expr;
+} {
+  expr = literalExpr()
+  {
+    if (expr instanceof Constant) {
+      Constant constant = (Constant)expr;
+      if (constant.value() instanceof BoolConstant || constant.value() instanceof NoneConstant$) {
+        return new MatchSingleton(constant.value(), attributes(token, token));
+      }
+    }
+    return new MatchValue(expr, attributes(expr, token));
+  }
+}
+
+iexpr literalExpr(): {
+  iexpr expr = null;
+  Constant leftNumber;
+  Constant rightNumber;
+  Token leftMinusToken = null;
+  ioperator binOp;
+} {
+  (
+    (
+      (<MINUS> { leftMinusToken = token; })?
+      leftNumber = number() {
+        if (leftMinusToken != null) {
+          expr = new UnaryOp(USub$.MODULE$, leftNumber, attributes(leftMinusToken, token));
+        } else {
+          expr = leftNumber;
+        }
+      }
+      (
+        (
+          <PLUS> { binOp = Add$.MODULE$; }
+        | <MINUS> { binOp = Sub$.MODULE$; }
+        )
+        rightNumber = number() {
+          expr = new BinOp(expr, binOp, rightNumber, attributes(expr, token));
+        }
+      )?
+    ) {
+      return expr;
+    }
+  | expr = strings() { return expr; }
+  | <NONE> { return new Constant(NoneConstant$.MODULE$, attributes(token, token)); }
+  | <TRUE> { return new Constant(new BoolConstant(true), attributes(token, token)); }
+  | <FALSE> { return new Constant(new BoolConstant(false), attributes(token, token)); }
+  )
+}
+
+// The python grammar has separate capture, wildcard, value and class pattern rules.
+// We need to merge them in order to factor out the leading nameOrAttr expression which they
+// all share.
+ipattern captureOrWildcardOrValueOrClassPattern(): {
+  iexpr expr;
+} {
+  expr = nameOrAttr()
+  (
+    {
+      ArrayList<ipattern> patterns = new ArrayList<>();
+      ArrayList<String> kwd_attrs = new ArrayList<>();
+      ArrayList<ipattern> kwd_patterns = new ArrayList<>();
+    }
+    <PAREN_OPEN>
+      patternArguments(patterns, kwd_attrs, kwd_patterns)
+    <PAREN_CLOSE>
+    {
+      return new MatchClass(expr, patterns, kwd_attrs, kwd_patterns, attributes(expr, token));
+    }
+  )?
+  {
+    // We only get here if it is not a class pattern.
+    if (expr instanceof Name) {
+      // A plain name is interpreted as pattern not as value.
+      String target = token.image;
+      if (!target.equals("_")) {
+        // Capture pattern
+        return new MatchAs(null, target, attributes(token, token));
+      } else {
+        // Wildcard pattern
+        return new MatchAs((ipattern)null, null, attributes(token, token));
+      }
+    } else {
+      // Value pattern
+      return new MatchValue(expr, attributes(expr, token));
+    }
+  }
+}
+
+iexpr nameOrAttr(): {
+  iexpr expr;
+} {
+  <NAME> { expr = new Name(token.image, attributes(token, token)); }
+  (
+    <DOT> <NAME> { expr = new Attribute(expr, token.image, attributes(expr, token)); }
+  )*
+  { return expr; }
+}
+
+void patternArguments(ArrayList<ipattern> patterns, ArrayList<String> kwd_attrs, ArrayList<ipattern> kwd_patterns): {
+  String keyword = null;
+} {
+  (
+    keyword = patternArgument(keyword, patterns, kwd_attrs, kwd_patterns)
+
+    (LOOKAHEAD(2)
+      <COMMA>
+      keyword = patternArgument(keyword, patterns, kwd_attrs, kwd_patterns)
+    )*
+    (<COMMA>)?
+  )?
+}
+
+String patternArgument(String lastKeyword, ArrayList<ipattern> patterns, ArrayList<String> kwd_attrs, ArrayList<ipattern> kwd_patterns): {
+  ipattern pattern;
+  String keyword = lastKeyword;
+} {
+  (LOOKAHEAD(2)
+    (<NAME> { keyword = token.image; } <ASSIGN>)
+    | ({ if (keyword != null) throw new ParseException("No non keyword pattern allowed after keyword pattern.");})
+  )
+  pattern = pattern()
+  {
+    if (keyword != null) {
+      kwd_attrs.add(keyword);
+      kwd_patterns.add(pattern);
+    } else {
+      patterns.add(pattern);
+    }
+    return keyword;
+  }
+}
+
+ipattern groupOrSequencePattern(): {
+  Token startToken;
+  ArrayList<ipattern> patterns = new ArrayList<>();
+} {
+  (
+    (
+      <SQUARE_OPEN> { startToken = token; }
+      (
+        groupOrSequenceCore(patterns)
+      )?
+      <SQUARE_CLOSE>
+      { return new MatchSequence(patterns, attributes(startToken, token)); }
+    )
+  | (
+      { boolean isSequence = true; }
+      <PAREN_OPEN> { startToken = token; }
+      (
+        isSequence = groupOrSequenceCore(patterns)
+      )?
+      <PAREN_CLOSE>
+      {
+        if (isSequence) {
+          return new MatchSequence(patterns, attributes(startToken, token));
+        } else {
+          // Group pattern
+          return patterns.get(0);
+        }
+      }
+    )
+  )
+}
+
+boolean groupOrSequenceCore(ArrayList<ipattern> patterns): {
+  ipattern pattern;
+  boolean starPatternExists = false;
+  boolean isSequence = false;
+} {
+  pattern = maybeStarPattern()
+  {
+    if (pattern instanceof MatchStar) starPatternExists = true;
+    patterns.add(pattern);
+  }
+  (LOOKAHEAD(2)
+    <COMMA>
+    pattern = maybeStarPattern()
+    {
+      if (starPatternExists) {
+        throw new ParseException("Only one star pattern allowed per sequence");
+      }
+      isSequence = true;
+      if (pattern instanceof MatchStar) starPatternExists = true;
+      patterns.add(pattern);
+    }
+  )*
+  (<COMMA> { isSequence = true; })?
+  { return isSequence; }
+}
+
+ipattern maybeStarPattern(): {
+  ipattern pattern;
+} {
+  (
+    pattern = starPattern()
+  | pattern = pattern()
+  )
+  { return pattern; }
+}
+
+MatchStar starPattern(): {
+
+} {
+  <STAR> <NAME> {
+    String target = token.image;
+    if (!target.equals("_")) {
+      // Capture pattern
+      return new MatchStar(target, attributes(token, token));
+    } else {
+      // Wildcard pattern
+      return new MatchStar((String)null, attributes(token, token));
+    }
+  }
+}
+
+String patternCaptureTarget(): {
+
+} {
+  <NAME>
+  {
+    if (token.image.equals("_")) throw new ParseException("Invalid capture pattern.");
+    return token.image;
+  }
+}
+
+MatchMapping mappingPattern(): {
+  Token startToken;
+  ArrayList<iexpr> keys = new ArrayList<>();
+  ArrayList<ipattern> patterns = new ArrayList<>();
+  String rest = null;
+} {
+  <CURLY_OPEN> { startToken = token; }
+  (
+    rest = keyValuePattern(rest, keys, patterns)
+    (LOOKAHEAD(2)
+      <COMMA>
+      rest = keyValuePattern(rest, keys, patterns)
+    )*
+    (<COMMA>)?
+  )?
+  <CURLY_CLOSE>
+  { return new MatchMapping(keys, patterns, rest, attributes(startToken, token)); }
+}
+
+String keyValuePattern(String lastRest, ArrayList<iexpr> keys, ArrayList<ipattern> patterns): {
+  iexpr key;
+  ipattern pattern;
+  String target;
+} {
+  (
+    (
+      (key = literalExpr() | key = nameOrAttr()) <COLON> pattern = pattern()
+      {
+        if (key instanceof Name) throw new ParseException("Pure name not allowed.");
+        keys.add(key);
+        patterns.add(pattern);
+        return lastRest;
+      }
+    )
+  | (
+      <DOUBLE_STAR> target = patternCaptureTarget()
+      {
+        if (lastRest != null) throw new ParseException("Only one double star pattern allowed.");
+        return target;
+      }
+    )
+  )
+}
+
+
+istmt smallStatement(): {
+  istmt stmt;
+} {
+  (
+  stmt = assignmentOrExpr() { stmt = printStatmentToPython2StyleRewrite(stmt); }
+| stmt = returnStatement()
+| stmt = importStatement()
+| stmt = raiseStatement()
+| stmt = passStatement()
+| stmt = delStatement()
+| stmt = yieldStatement()
+| stmt = assertStatement()
+| stmt = breakStatement()
+| stmt = continueStatement()
+| stmt = globalStatement()
+| stmt = nonlocalStatement()
+  )
+  {
+    return stmt;
+  }
+}
+
+// We are little bit less restrictive than the python 3.9 grammar because
+// we allow logical expressions in star expressions to be returned.
+// E.g. "return * x and y" the python 3.9 grammar would require parenthesis:
+// "return *(x and y)".
+Return returnStatement(): {
+  iexpr expression = null;
+  Token startToken;
+} {
+  <RETURN> { startToken = token; } (expression = starExpressions())?
+  {
+    return new Return(expression, attributes(startToken, token));
+  }
+}
+
+istmt importStatement(): {
+  istmt stmt;
+} {
+  (
+    stmt = importName()
+  | stmt = importFrom()
+  )
+  { return stmt; }
+}
+
+Import importName(): {
+  ArrayList<Alias> names;
+  Token startToken;
+} {
+  <IMPORT> { startToken = token; } names = dottedAsNames()
+  { return new Import(names, attributes(startToken, token)); }
+}
+
+ArrayList<Alias> dottedAsNames(): {
+  Alias name;
+  ArrayList<Alias> names = new ArrayList<Alias>();
+} {
+  name = dottedAsName() { names.add(name); }
+  (<COMMA> name = dottedAsName() { names.add(name); })*
+  { return names; }
+}
+
+Alias dottedAsName(): {
+  String dottedName;
+  String asName = null;
+} {
+  dottedName = dottedName() (<AS> <NAME>{ asName = token.image; })?
+  { return new Alias(dottedName, asName); }
+}
+
+String dottedName(): {
+  String dottedName;
+} {
+  <NAME> { dottedName = token.image; }
+  (<DOT> <NAME> { dottedName = dottedName + "." + token.image; })*
+  { return dottedName; }
+}
+
+ImportFrom importFrom(): {
+  int level = 0;
+  String module = null;
+  ArrayList<Alias> names;
+  Token startToken;
+} {
+  <FROM> { startToken = token; }
+  (<DOT> { level += 1; } | <ELLIPSIS> { level += 3; })*
+  (module = dottedName())?
+  <IMPORT>
+  names = importFromTargets()
+  {
+    if (level != 0 || module != null) {
+      return new ImportFrom(module, names, level, attributes(startToken, token));
+    } else {
+      throw new ParseException("TODO");
+    }
+  }
+}
+
+ArrayList<Alias> importFromTargets(): {
+  Alias name;
+  ArrayList<Alias> names;
+} {
+  (
+  <STAR> {
+    names = new ArrayList<Alias>();
+    names.add(new Alias(token.image, (String)null));
+  }
+| <PAREN_OPEN> names = importFromAsNames() <PAREN_CLOSE>
+| names = importFromAsNames()
+  )
+  { return names; }
+}
+
+ArrayList<Alias> importFromAsNames(): {
+  Alias name;
+  ArrayList<Alias> names = new ArrayList<Alias>();
+} {
+  name = importFromAsName() { names.add(name); }
+  (LOOKAHEAD(2)
+    <COMMA> name = importFromAsName() { names.add(name); }
+  )*
+  (<COMMA>)?
+  { return names; }
+}
+
+Alias importFromAsName(): {
+  String name;
+  String asName = null;
+} {
+  <NAME> { name = token.image; } (<AS> <NAME> { asName = token.image; })?
+  { return new Alias(name, asName); }
+}
+
+istmt raiseStatement(): {
+  Token startToken;
+  iexpr exceptionExpr = null;
+  iexpr causeExpr = null;
+  iexpr instExpr = null;
+  iexpr tracebackExpr = null;
+} {
+  <RAISE> { startToken = token; }
+  (
+    exceptionExpr = expression()
+    (
+      (<FROM> causeExpr = expression())
+    | (
+        <COMMA> instExpr = expression()
+        (
+          <COMMA> tracebackExpr = expression()
+        )?
+      )
+    )?
+  )?
+  {
+    if (instExpr != null) {
+      return new RaiseP2(exceptionExpr, instExpr, tracebackExpr, attributes(startToken, token));
+    } else {
+      return new Raise(exceptionExpr, causeExpr, attributes(startToken, token));
+    }
+  }
+}
+
+Pass passStatement(): {
+} {
+  <PASS> { return new Pass(attributes(token, token)); }
+}
+
+// This is not as restrictive as the corresponding CPython 3.9 rule
+// because we except a primary as target which includes e.g. number literals
+// which would be invalid Python code.
+Delete delStatement(): {
+  Token startToken;
+  iexpr target;
+  ArrayList<iexpr> targets = new ArrayList<iexpr>();
+} {
+  <DEL> { startToken = token; }
+  target = primary() { targets.add(target); }
+  (LOOKAHEAD(2)
+    <COMMA>
+    target = primary() { targets.add(target); }
+  )*
+  (<COMMA>)?
+  { return new Delete(targets, attributes(startToken, token)); }
+}
+
+Expr yieldStatement(): {
+  iexpr yieldExpr;
+} {
+  yieldExpr = yieldExpression()
+  { return new Expr(yieldExpr); }
+}
+
+Assert assertStatement(): {
+  Token startToken;
+  iexpr testExpr;
+  iexpr msgExpr = null;
+} {
+  <ASSERT> { startToken = token; }
+  testExpr = expression()
+  (<COMMA> msgExpr = expression())?
+  { return new Assert(testExpr, msgExpr, attributes(startToken, token)); }
+}
+
+Break breakStatement(): {
+} {
+  <BREAK> { return new Break(attributes(token, token)); }
+}
+
+Continue continueStatement(): {
+} {
+  <CONTINUE> { return new Continue(attributes(token, token)); }
+}
+
+Global globalStatement(): {
+  Token startToken;
+  ArrayList<String> names = new ArrayList<String>();
+} {
+  <GLOBAL> { startToken = token; }
+  <NAME> { names.add(token.image); }
+  (<COMMA> <NAME> { names.add(token.image); })*
+  { return new Global(names, attributes(startToken, token)); }
+}
+
+Nonlocal nonlocalStatement(): {
+  Token startToken;
+  ArrayList<String> names = new ArrayList<String>();
+} {
+  <NONLOCAL> { startToken = token; }
+  <NAME> { names.add(token.image); }
+  (<COMMA> <NAME> { names.add(token.image); })*
+  { return new Nonlocal(names, attributes(startToken, token)); }
+}
+
+istmt compoundStatement(): {
+  istmt stmt;
+} {
+  (
+    stmt = decoratedStatement()
+  | stmt = asyncStatement()
+  | stmt = functionDef(new ArrayList<iexpr>(), false, null)
+  | stmt = ifStatement()
+  | stmt = classDef(new ArrayList<iexpr>())
+  | stmt = forStatement(false, null)
+  | stmt = withStatement(false, null)
+  | stmt = tryStatement()
+  | stmt = whileStatement()
+  )
+  { return stmt; }
+}
+
+istmt decoratedStatement(): {
+  ArrayList<iexpr> decorators;
+  Token asyncToken;
+  istmt stmt;
+} {
+  decorators = decorators()
+  (
+    stmt = functionDef(decorators, false, null)
+  | (<ASYNC> { asyncToken = token; } stmt = functionDef(decorators, true, asyncToken))
+  | stmt = classDef(decorators)
+  )
+  { return stmt; }
+}
+
+istmt asyncStatement(): {
+  Token asyncToken;
+  istmt stmt;
+} {
+  <ASYNC> { asyncToken = token; }
+  (
+    stmt = functionDef(new ArrayList<iexpr>(), true, asyncToken)
+  | stmt = forStatement(true, asyncToken)
+  | stmt = withStatement(true, asyncToken)
+  )
+  { return stmt; }
+}
+
+istmt functionDef(ArrayList<iexpr> decorators, boolean isAsync, Token asyncToken): {
+  Token startToken = asyncToken;
+  String name;
+  Arguments parameters;
+  iexpr returnExpr = null;
+  ArrayList<istmt> blockStmts;
+} {
+  <DEF> { if (!isAsync) {startToken = token;} }
+  <NAME> { name = token.image; }
+  <PAREN_OPEN>
+  parameters = parameters()
+  <PAREN_CLOSE>
+  (<ARROW> returnExpr = expression())?
+  <COLON>
+  blockStmts = block()
+  {
+    if (isAsync) {
+      return new AsyncFunctionDef(name, parameters, blockStmts, decorators,
+        returnExpr, null, attributes(startToken, token));
+    } else {
+      return new FunctionDef(name, parameters, blockStmts, decorators,
+        returnExpr, null, attributes(startToken, token));
+    }
+  }
+}
+
+// Sister function of lambdaParameters.
+// Only difference that type annotations and type comment are not allowed in this
+// version. Changes made here should also be done in the sister function.
+// This rule matches always because its contend is purely optional.
+//
+// This is a fully factored out version of the CPython 3.9 parameters parser rule
+// minus the support for type comments which are currently swallowed by the lexer.
+// Dont be confused by the inconsistent use of argument and parameter identifiers.
+// Arg, Arguments, Arg and Argument class names are part of the user facing API
+// with which we mimic the CPython AST API and thus their names are what they are.
+// They should rather be named iparam, iparameters etc..
+Arguments parameters(): {
+  ArrayList<Arg> posOnlyArgs = new ArrayList<Arg>();
+  ArrayList<Arg> args = new ArrayList<Arg>();
+  // Contains the defaults for posOnlyArgs and args.
+  ArrayList<iexpr> defaults = new ArrayList<iexpr>();
+  BoxedObject<Arg> varArg = new BoxedObject<Arg>(null);
+  ArrayList<Arg> kwOnlyArgs = new ArrayList<Arg>();
+  // Contains the defaults for kwOnlyArgs. If such an
+  // argument has no default, null is added instead.
+  ArrayList<iexpr> kwDefaults = new ArrayList<iexpr>();
+  BoxedObject<Arg> kwArg = new BoxedObject<Arg>(null);
+
+  boolean defaultRequired = false;
+  ArrayList<Arg> tmpArgs = new ArrayList<Arg>();
+} {
+  (
+    (
+      defaultRequired = positionalParameters(defaultRequired, args, defaults)
+      (
+        <COMMA>
+        (
+          (
+            <DIV>
+            { posOnlyArgs = args; args = new ArrayList<Arg>(); }
+            (
+              <COMMA>
+              (
+                (
+                  positionalParameters(defaultRequired, args, defaults)
+                  (
+                    <COMMA>
+                    (
+                      starAndFollowingParameters(varArg, kwOnlyArgs, kwDefaults, kwArg)
+                      | kwArg.object = doubleStarParameters()
+                      | {}
+                    )
+                  )?
+                )
+              | starAndFollowingParameters(varArg, kwOnlyArgs, kwDefaults, kwArg)
+              | kwArg.object = doubleStarParameters()
+              | {}
+              )
+            )?
+          )
+        | starAndFollowingParameters(varArg, kwOnlyArgs, kwDefaults, kwArg)
+        | kwArg.object = doubleStarParameters()
+        | {}
+        )
+      )?
+    )
+  | starAndFollowingParameters(varArg, kwOnlyArgs, kwDefaults, kwArg)
+  | kwArg.object = doubleStarParameters()
+  | {}
+  )
+  {
+    return new Arguments(posOnlyArgs, args, varArg.object, kwOnlyArgs,
+     kwDefaults, kwArg.object, defaults);
+  }
+}
+
+// Sister function of lambdaStarAndFollowingParameters.
+// Only difference that type annotations and type comment are not allowed in this
+// version. Changes made here should also be done in the sister function.
+void starAndFollowingParameters(BoxedObject<Arg> varArg,
+                                ArrayList<Arg> kwOnlyArgs,
+                                ArrayList<iexpr> kwDefaults,
+                                BoxedObject<Arg> kwArg): {
+} {
+  <STAR>
+  (
+    (
+      varArg.object = typedFunctionParameterDef()
+      (
+        <COMMA>
+        (
+          (
+            kwOnlyParameters(kwOnlyArgs, kwDefaults)
+            (
+              <COMMA>
+              (kwArg.object = doubleStarParameters())?
+            )?
+          )
+        | (
+            kwArg.object = doubleStarParameters()
+          )
+        | {}
+        )
+      )?
+    )
+  | (
+      <COMMA> kwOnlyParameters(kwOnlyArgs, kwDefaults)
+     (
+       <COMMA>
+       (kwArg.object = doubleStarParameters())?
+     )?
+    )
+  )
+}
+
+// Sister function of lambdaDoubleStarParameters.
+// Only difference that type annotations and type comment are not allowed in this
+// version. Changes made here should also be done in the sister function.
+Arg doubleStarParameters(): {
+  Arg kwArg;
+} {
+  <DOUBLE_STAR> kwArg = typedFunctionParameterDef()
+  (<COMMA>)?
+  { return kwArg; }
+}
+
+// Sister function of lambdaPositionalParameters.
+// Only difference that type annotations and type comment are not allowed in this
+// version. Changes made here should also be done in the sister function.
+boolean positionalParameters(boolean initialDefaultRequired,
+                             ArrayList<Arg> params, ArrayList<iexpr> defaults): {
+  Arg param;
+  iexpr defaultExpr;
+  boolean defaultRequired = initialDefaultRequired;
+} {
+  param = typedFunctionParameterDef() { params.add(param); }
+  (
+    <ASSIGN> defaultExpr = expression() { defaults.add(defaultExpr); defaultRequired = true; }
+  | { if (defaultRequired) { throw new ParseException("TODO"); } }
+  )
+  (LOOKAHEAD(2)
+    <COMMA> param = typedFunctionParameterDef() { params.add(param); }
+    (
+      <ASSIGN> defaultExpr = expression() { defaults.add(defaultExpr); defaultRequired = true; }
+    | { if (defaultRequired) { throw new ParseException("TODO"); } }
+    )
+  )*
+  { return defaultRequired; }
+}
+
+// Sister function of lambdaKwOnlyParameters.
+// Only difference that type annotations and type comment are not allowed in this
+// version. Changes made here should also be done in the sister function.
+void kwOnlyParameters(ArrayList<Arg> params, ArrayList<iexpr> defaults): {
+  Arg param;
+  iexpr defaultExpr;
+} {
+  param = typedFunctionParameterDef() { params.add(param); }
+  (
+    <ASSIGN> defaultExpr = expression() { defaults.add(defaultExpr); }
+  | { defaults.add(null); }
+  )
+  (LOOKAHEAD(2)
+    <COMMA> param = typedFunctionParameterDef() { params.add(param); }
+    (
+      <ASSIGN> defaultExpr = expression() { defaults.add(defaultExpr); }
+    | { defaults.add(null); }
+    )
+  )*
+}
+
+Arg typedFunctionParameterDef(): {
+  Token startToken;
+  String name;
+  iexpr defaultExpr = null;
+} {
+  <NAME> { startToken = token; name = token.image; }
+  (<COLON> defaultExpr = expression())?
+  { return new Arg(name, defaultExpr, null, attributes(startToken, token)); }
+}
+
+// Sister function of parameters.
+// Only difference that type annotations and type comment are not allowed in this
+// version. Changes made here should also be done in the sister function.
+Arguments lambdaParameters(): {
+  ArrayList<Arg> posOnlyArgs = new ArrayList<Arg>();
+  ArrayList<Arg> args = new ArrayList<Arg>();
+  // Contains the defaults for posOnlyArgs and args.
+  ArrayList<iexpr> defaults = new ArrayList<iexpr>();
+  BoxedObject<Arg> varArg = new BoxedObject<Arg>(null);
+  ArrayList<Arg> kwOnlyArgs = new ArrayList<Arg>();
+  // Contains the defaults for kwOnlyArgs. If such an
+  // argument has no default, null is added instead.
+  ArrayList<iexpr> kwDefaults = new ArrayList<iexpr>();
+  BoxedObject<Arg> kwArg = new BoxedObject<Arg>(null);
+
+  boolean defaultRequired = false;
+  ArrayList<Arg> tmpArgs = new ArrayList<Arg>();
+} {
+  (
+    (
+      defaultRequired = lambdaPositionalParameters(defaultRequired, args, defaults)
+      (
+        <COMMA>
+        (
+          (
+            <DIV>
+            { posOnlyArgs = args; args = new ArrayList<Arg>(); }
+            (
+              <COMMA>
+              (
+                (
+                  lambdaPositionalParameters(defaultRequired, args, defaults)
+                  (
+                    <COMMA>
+                    (
+                      lambdaStarAndFollowingParameters(varArg, kwOnlyArgs, kwDefaults, kwArg)
+                      | kwArg.object = lambdaDoubleStarParameters()
+                      | {}
+                    )
+                  )?
+                )
+              | lambdaStarAndFollowingParameters(varArg, kwOnlyArgs, kwDefaults, kwArg)
+              | kwArg.object = lambdaDoubleStarParameters()
+              | {}
+              )
+            )?
+          )
+        | lambdaStarAndFollowingParameters(varArg, kwOnlyArgs, kwDefaults, kwArg)
+        | kwArg.object = lambdaDoubleStarParameters()
+        | {}
+        )
+      )?
+    )
+  | lambdaStarAndFollowingParameters(varArg, kwOnlyArgs, kwDefaults, kwArg)
+  | kwArg.object = lambdaDoubleStarParameters()
+  | {}
+  )
+  {
+    return new Arguments(posOnlyArgs, args, varArg.object, kwOnlyArgs,
+     kwDefaults, kwArg.object, defaults);
+  }
+}
+
+// Sister function of starAndFollowingParameters.
+// Only difference that type annotations and type comment are not allowed in this
+// version. Changes made here should also be done in the sister function.
+void lambdaStarAndFollowingParameters(BoxedObject<Arg> varArg,
+                                      ArrayList<Arg> kwOnlyArgs,
+                                      ArrayList<iexpr> kwDefaults,
+                                      BoxedObject<Arg> kwArg): {
+} {
+  <STAR>
+  (
+    (
+      varArg.object = lambdaFunctionParameterDef()
+      (
+        <COMMA>
+        (
+          (
+            lambdaKwOnlyParameters(kwOnlyArgs, kwDefaults)
+            (
+              <COMMA>
+              (kwArg.object = lambdaDoubleStarParameters())?
+            )?
+          )
+        | (
+            kwArg.object = lambdaDoubleStarParameters()
+          )
+        | {}
+        )
+      )?
+    )
+  | (
+      <COMMA> lambdaKwOnlyParameters(kwOnlyArgs, kwDefaults)
+     (
+       <COMMA>
+       (kwArg.object = lambdaDoubleStarParameters())?
+     )?
+    )
+  )
+}
+
+// Sister function of doubleStarParameters.
+// Only difference that type annotations and type comment are not allowed in this
+// version. Changes made here should also be done in the sister function.
+Arg lambdaDoubleStarParameters(): {
+  Arg kwArg;
+} {
+  <DOUBLE_STAR> kwArg = lambdaFunctionParameterDef()
+  (<COMMA>)?
+  { return kwArg; }
+}
+
+// Sister function of positionalParameters.
+// Only difference that type annotations and type comment are not allowed in this
+// version. Changes made here should also be done in the sister function.
+boolean lambdaPositionalParameters(boolean initialDefaultRequired,
+                                   ArrayList<Arg> params, ArrayList<iexpr> defaults): {
+  Arg param;
+  iexpr defaultExpr;
+  boolean defaultRequired = initialDefaultRequired;
+} {
+  param = lambdaFunctionParameterDef() { params.add(param); }
+  (
+    <ASSIGN> defaultExpr = expression() { defaults.add(defaultExpr); defaultRequired = true; }
+  | { if (defaultRequired) { throw new ParseException("TODO"); } }
+  )
+  (LOOKAHEAD(2)
+    <COMMA> param = lambdaFunctionParameterDef() { params.add(param); }
+    (
+      <ASSIGN> defaultExpr = expression() { defaults.add(defaultExpr); defaultRequired = true; }
+    | { if (defaultRequired) { throw new ParseException("TODO"); } }
+    )
+  )*
+  { return defaultRequired; }
+}
+
+// Sister function of kwOnlyParameters.
+// Only difference that type annotations and type comment are not allowed in this
+// version. Changes made here should also be done in the sister function.
+void lambdaKwOnlyParameters(ArrayList<Arg> params, ArrayList<iexpr> defaults): {
+  Arg param;
+  iexpr defaultExpr;
+} {
+  param = lambdaFunctionParameterDef() { params.add(param); }
+  (
+    <ASSIGN> defaultExpr = expression() { defaults.add(defaultExpr); }
+  | { defaults.add(null); }
+  )
+  (LOOKAHEAD(2)
+    <COMMA> param = lambdaFunctionParameterDef() { params.add(param); }
+    (
+      <ASSIGN> defaultExpr = expression() { defaults.add(defaultExpr); }
+    | { defaults.add(null); }
+    )
+  )*
+}
+
+Arg lambdaFunctionParameterDef(): {
+  Token startToken;
+  String name;
+} {
+  <NAME> { startToken = token; name = token.image; }
+  { return new Arg(name, null, (String)null, attributes(startToken, token)); }
+}
+
+If ifStatement(): {
+  Token startToken;
+  iexpr testExpr;
+  ArrayList<istmt> blockStmts;
+  ArrayList<istmt> elseStmts;
+} {
+  <IF> { startToken = token; }
+  testExpr = namedExpression()
+  <COLON>
+  blockStmts = block()
+  (elseStmts = elifBlock() | elseStmts = elseBlock() | { elseStmts = new ArrayList<istmt>(); })
+  { return new If(testExpr, blockStmts, elseStmts, attributes(startToken, token)); }
+}
+
+// Returns a list with one If statement to ease usage of this rule.
+ArrayList<istmt> elifBlock(): {
+  Token startToken;
+  iexpr testExpr;
+  ArrayList<istmt> blockStmts;
+  ArrayList<istmt> elseStmts;
+} {
+  <ELIF> { startToken = token; }
+  testExpr = namedExpression()
+  <COLON>
+  blockStmts = block()
+  (elseStmts = elifBlock() | elseStmts = elseBlock() | { elseStmts = new ArrayList<istmt>(); })
+  {
+    ArrayList<istmt> stmts = new ArrayList<istmt>();
+    stmts.add(new If(testExpr, blockStmts, elseStmts, attributes(startToken, token)));
+    return stmts;
+  }
+}
+
+ArrayList<istmt> elseBlock(): {
+  ArrayList<istmt> stmts;
+} {
+  <ELSE> <COLON> stmts = block() { return stmts; }
+}
+
+ClassDef classDef(ArrayList<iexpr> decorators): {
+  Token startToken;
+  String name;
+  ArrayList<iexpr> bases = new ArrayList<iexpr>();
+  ArrayList<Keyword> keywords = new ArrayList<Keyword>();
+  ArrayList<istmt> blockStmts;
+} {
+  <CLASS> { startToken = token; } <NAME> { name = token.image; }
+  (<PAREN_OPEN> arguments(bases, keywords) <PAREN_CLOSE>)?
+  <COLON>
+  blockStmts = block()
+  { return new ClassDef(name, bases, keywords, blockStmts, decorators,
+     attributes(startToken, token)); }
+}
+
+ArrayList<iexpr> decorators(): {
+  iexpr namedExpression;
+  ArrayList<iexpr> decoratorExpressions = new ArrayList<iexpr>();
+} {
+  (
+    <AT>
+    namedExpression = namedExpression() { decoratorExpressions.add(namedExpression); }
+    <NEWLINE>
+  )+
+  { return decoratorExpressions; }
+}
+
+istmt forStatement(boolean isAsync, Token asyncToken): {
+  Token startToken = asyncToken;
+  iexpr target;
+  iexpr iter;
+  ArrayList<istmt> blockStmts;
+  ArrayList<istmt> elseStmts;
+} {
+  <FOR> { if (!isAsync) {startToken = token;} }
+  target = starTargets()
+  <IN>
+  iter = starExpressions()
+  <COLON>
+  blockStmts = block()
+  (elseStmts = elseBlock() | { elseStmts = new ArrayList<istmt>(); })
+  {
+    if (isAsync) {
+      return new AsyncFor(target, iter, blockStmts, elseStmts, null, attributes(startToken, token));
+    } else {
+      return new For(target, iter, blockStmts, elseStmts, null, attributes(startToken, token));
+    }
+  }
+}
+
+istmt withStatement(boolean isAsync, Token asyncToken): {
+  Token startToken = asyncToken;
+  ArrayList<Withitem> items;
+  ArrayList<istmt> blockStmts;
+} {
+  <WITH> { if (!isAsync) {startToken = token;} }
+  // The following choice starts with an ambiguity because the first Withitem could
+  // be a parenthesized expression. Without LOOKAHEAD(2) JavaCC thus complains as
+  // expected. With LOOKAHEAD(2) there is still an ambiguity but JavaCC for whatever
+  // reason stops complaining an opportunistically takes the first choice if possible
+  // which is what we want here, although i dont fully understand it.
+  (LOOKAHEAD(2)
+    (
+      <PAREN_OPEN>
+      items = withItems()
+      <PAREN_CLOSE>
+    )
+  | (
+      items = withItems()
+    )
+  )
+  <COLON>
+  blockStmts = block()
+  {
+    if (isAsync) {
+      return new AsyncWith(items, blockStmts, null, attributes(startToken, token));
+    } else {
+      return new With(items, blockStmts, null, attributes(startToken, token));
+    }
+  }
+}
+
+ArrayList<Withitem> withItems(): {
+  ArrayList<Withitem> items = new ArrayList<Withitem>();
+  Withitem item;
+} {
+  item = withItem() { items.add(item); }
+  (LOOKAHEAD(2)
+    <COMMA>
+    item = withItem() { items.add(item); }
+  )*
+  (<COMMA>)?
+  { return items; }
+}
+
+Withitem withItem(): {
+  iexpr contextExpr;
+  iexpr optionalVars = null;
+} {
+  contextExpr = expression()
+  (<AS> optionalVars = starTarget())?
+  { return new Withitem(contextExpr, optionalVars); }
+}
+
+Try tryStatement(): {
+  Token startToken;
+  ArrayList<istmt> blockStmts;
+  ExceptHandler exceptHandler;
+  ArrayList<ExceptHandler> exceptHandlers = new ArrayList<ExceptHandler>();
+  ArrayList<istmt> elseStmts;
+  ArrayList<istmt> finallyStmts;
+} {
+  <TRY> { startToken = token; }
+  <COLON>
+  blockStmts = block()
+  (
+    finallyStmts = finallyBlock()
+    { return new Try(blockStmts, exceptHandlers, new ArrayList<istmt>(), finallyStmts,
+     attributes(startToken, token)); }
+  | (
+      (exceptHandler = exceptBlock() { exceptHandlers.add(exceptHandler); })+
+      (elseStmts = elseBlock() | { elseStmts = new ArrayList<istmt>(); })
+      (finallyStmts = finallyBlock() | { finallyStmts = new ArrayList<istmt>(); })
+      { return new Try(blockStmts, exceptHandlers, elseStmts, finallyStmts,
+       attributes(startToken, token)); }
+    )
+  )
+}
+
+ExceptHandler exceptBlock(): {
+  Token startToken;
+  iexpr typeExpr = null;
+  String name = null;
+  ArrayList<istmt> blockStmts;
+} {
+  <EXCEPT> { startToken = token; }
+  (
+    typeExpr = expression()
+    (
+      // The COMMA is only valid in python2.
+      (<AS> | <COMMA>) <NAME> { name = token.image; }
+    )?
+  )?
+  <COLON>
+  blockStmts = block()
+  { return new ExceptHandler(typeExpr, name, blockStmts, attributes(startToken, token)); }
+}
+
+ArrayList<istmt> finallyBlock(): {
+  ArrayList<istmt> blockStmts;
+} {
+  <FINALLY>
+  <COLON>
+  blockStmts = block()
+  { return blockStmts; }
+}
+
+While whileStatement(): {
+  Token startToken;
+  iexpr testExpr;
+  ArrayList<istmt> blockStmts;
+  ArrayList<istmt> elseStmts;
+} {
+  <WHILE> { startToken = token; }
+  testExpr = namedExpression()
+  <COLON>
+  blockStmts = block()
+  (elseStmts = elseBlock() | { elseStmts = new ArrayList<istmt>(); })
+  { return new While(testExpr, blockStmts, elseStmts, attributes(startToken, token)); }
+}
+
+ArrayList<istmt> block(): {
+  ArrayList<istmt> stmts;
+} {
+  ((
+  <NEWLINE>
+  <INDENT>
+  stmts = statementsAndDedentOrEof()
+  )
+| stmts = simpleStatement()) {
+    return stmts;
+ }
+}
+
+istmt assignmentOrExpr(): {
+  iexpr targetExpr;
+  iexpr expr = null;
+  iexpr valueExpr = null;
+  iexpr annotationExpr = null;
+  boolean isSimple = false;
+  ArrayList<iexpr> targets;
+  ioperator op;
+} {
+  targetExpr = starExpressions() { isSimple = token.kind == NAME; }
+  (
+    (
+      <COLON> annotationExpr = expression()
+      (
+        <ASSIGN> (valueExpr = yieldExpression() | valueExpr = starExpressions())
+      )?
+      {
+        return new AnnAssign(targetExpr, annotationExpr, valueExpr, isSimple,
+         attributes(targetExpr, token));
+      }
+    )
+  | (
+      (
+        <PLUS_ASSIGN> { op = Add$.MODULE$; }
+      | <MINUS_ASSIGN> { op = Sub$.MODULE$;}
+      | <STAR_ASSIGN> { op = Mult$.MODULE$;}
+      | <AT_ASSIGN> { op = MatMult$.MODULE$;}
+      | <DIV_ASSIGN> { op = Div$.MODULE$;}
+      | <MOD_ASSIGN> { op = Mod$.MODULE$;}
+      | <BIT_AND_ASSIGN> { op = BitAnd$.MODULE$;}
+      | <BIT_OR_ASSIGN> { op = BitOr$.MODULE$;}
+      | <BIT_XOR_ASSIGN> { op = BitXor$.MODULE$;}
+      | <LSHIFT_ASSIGN> { op = LShift$.MODULE$;}
+      | <RSHIFT_ASSIGN> { op = RShift$.MODULE$;}
+      | <POW_ASSIGN> { op = Pow$.MODULE$;}
+      | <FLOOR_DIV_ASSIGN> { op = FloorDiv$.MODULE$;}
+      )
+      (valueExpr = yieldExpression() | valueExpr = starExpressions())
+      { return new AugAssign(targetExpr, op, valueExpr, attributes(targetExpr, token)); }
+    )
+  | (
+      {
+        targets = new ArrayList<iexpr>();
+        targets.add(targetExpr);
+      }
+      (
+        <ASSIGN>
+        (expr = yieldExpression() | expr = starExpressions())
+        { targets.add(expr); }
+      )+
+      {
+        valueExpr = targets.remove(targets.size() - 1);
+        return new Assign(targets, valueExpr, attributes(targetExpr, token));
+      }
+    )
+  | { return new Expr(targetExpr); }
+  )
+}
+
+// Returns the expression list elements as tuple or
+// a single express if the expression list contains only
+// one element and does not end with a comma.
+iexpr expressionsAsTuple(): {
+  iexpr firstExpression;
+  iexpr expression;
+  ArrayList<iexpr> expressions = new ArrayList<iexpr>();
+} {
+  firstExpression = expression() { expressions.add(firstExpression); }
+  (LOOKAHEAD(2)
+   <COMMA> expression = expression() { expressions.add(expression); }
+  )*
+  (<COMMA>)?
+  {
+    if (token.kind != COMMA && expressions.size() == 1) {
+      return expressions.get(0);
+    } else {
+      return new Tuple(expressions, attributes(firstExpression, token));
+    }
+  }
+}
+
+// Returns a tuple for multiple expressions and single expression with trailing comma.
+// Otherwise returns the single expression.
+// Grammar: (expression | starredBitwiseOr) ("," expression | starredBitwiseOr)* [","]
+iexpr starExpressions(): {
+  iexpr firstExpression;
+  iexpr expression;
+  ArrayList<iexpr> expressions = null;
+} {
+  (
+    firstExpression = expression()
+  | firstExpression = starredBitwiseOr()
+  )
+  (LOOKAHEAD(2)
+    <COMMA>
+    {
+      if (expressions == null) {
+        expressions = new ArrayList<iexpr>();
+        expressions.add(firstExpression);
+      }
+    }
+    (
+      expression = expression()
+    | expression = starredBitwiseOr()
+    ) { expressions.add(expression); }
+  )*
+  (<COMMA>)?
+  {
+    if (expressions == null && token.kind != COMMA) {
+      // Single expression no trailing comma.
+      return firstExpression;
+    }
+    if (expressions == null) {
+      // Single expression, trailing comma.
+      expressions = new ArrayList<iexpr>();
+      expressions.add(firstExpression);
+    }
+    return new Tuple(expressions, attributes(firstExpression, token));
+  }
+}
+
+// This method is the same as starExpressions except that instead of expression it
+// expects conditionalExpression.
+// Returns a tuple for multiple expressions and single expression with trailing comma.
+// Otherwise returns the single expression.
+// Grammar: (conditionalExpression | starredBitwiseOr) ("," conditionalExpression | starredBitwiseOr)* [","]
+iexpr starConditionalExpressions(): {
+  iexpr firstExpression;
+  iexpr expression;
+  ArrayList<iexpr> expressions = null;
+} {
+  (
+    firstExpression = conditionalExpression()
+  | firstExpression = starredBitwiseOr()
+  )
+  (LOOKAHEAD(2)
+    <COMMA>
+    {
+      if (expressions == null) {
+        expressions = new ArrayList<iexpr>();
+        expressions.add(firstExpression);
+      }
+    }
+    (
+      expression = conditionalExpression()
+    | expression = starredBitwiseOr()
+    ) { expressions.add(expression); }
+  )*
+  (<COMMA>)?
+  {
+    if (expressions == null && token.kind != COMMA) {
+      // Single expression no trailing comma.
+      return firstExpression;
+    }
+    if (expressions == null) {
+      // Single expression, trailing comma.
+      expressions = new ArrayList<iexpr>();
+      expressions.add(firstExpression);
+    }
+    return new Tuple(expressions, attributes(firstExpression, token));
+  }
+}
+
+iexpr yieldExpression(): {
+  Token startToken;
+  iexpr valueExpr = null;
+} {
+  <YIELD> { startToken = token; }
+  (
+    <FROM> valueExpr = expression()
+    { return new YieldFrom(valueExpr, attributes(startToken, token)); }
+  | valueExpr = starExpressions()
+    { return new Yield(valueExpr, attributes(startToken, token)); }
+  | { return new Yield((iexpr)null, attributes(startToken, token)); }
+  )
+}
+
+iexpr namedExpression(): {
+  iexpr expression;
+  iexpr value;
+} {
+  expression = expression()
+  (
+  <COLON_ASSIGN> value = expression()
+  {
+    // To only accept valid code we would need to check that expression is
+    // a NAME at this point. But since we want to work on best effort basis
+    // we just dont check.
+    expression = new NamedExpr(expression, value, attributes(expression, token)); }
+  )?
+  {
+    return expression;;
+  }
+}
+
+iexpr expression(): {
+  iexpr expression;
+} {
+  (
+    expression = conditionalExpression()
+  | expression = lambda()
+  )
+  {
+    return expression;
+  }
+}
+
+iexpr conditionalExpression(): {
+  iexpr expression;
+  iexpr testExpression = null;
+  iexpr elseExpression = null;
+} {
+  expression = disjunction()
+  (<IF> testExpression = disjunction() <ELSE> elseExpression = expression())?
+  {
+    if (testExpression != null) {
+      return new IfExp(testExpression, expression, elseExpression, attributes(expression, token));
+    }
+    return expression;
+  }
+}
+
+iexpr lambda(): {
+  Token startToken;
+  Arguments parameters;
+  iexpr body;
+} {
+  <LAMBDA> { startToken = token; }
+  parameters = lambdaParameters()
+  <COLON> body = expression()
+  { return new Lambda(parameters, body, attributes(startToken, token)); }
+}
+
+iexpr disjunction(): {
+  iexpr expression;
+  iexpr nextExpression;
+  ArrayList<iexpr> allExpressions = null;
+} {
+  expression = conjunction()
+  (<OR> nextExpression = conjunction() {
+    if (allExpressions == null) {
+      allExpressions = new ArrayList<iexpr>();
+      allExpressions.add(expression);
+    }
+    allExpressions.add(nextExpression);
+  }
+  )* {
+    if (allExpressions != null) {
+      return new BoolOp(Or$.MODULE$, allExpressions, attributes(expression, token));
+    } else {
+      return expression;
+    }
+  }
+}
+
+iexpr conjunction(): {
+  iexpr expression;
+  iexpr nextExpression;
+  ArrayList<iexpr> allExpressions = null;
+} {
+  expression = inversion()
+  (<AND> nextExpression = inversion() {
+    if (allExpressions == null) {
+      allExpressions = new ArrayList<iexpr>();
+      allExpressions.add(expression);
+    }
+    allExpressions.add(nextExpression);
+  }
+  )* {
+    if (allExpressions != null) {
+      return new BoolOp(And$.MODULE$, allExpressions, attributes(expression, token));
+    } else {
+      return expression;
+    }
+  }
+}
+
+iexpr inversion(): {
+  iexpr expression;
+  Token startToken;
+} {
+  (<NOT> { startToken = token; }
+   expression = inversion() {
+     return new UnaryOp(Not$.MODULE$, expression, attributes(startToken, token)); }
+  )
+| expression = comparison() { return expression; }
+}
+
+iexpr comparison(): {
+  iexpr expression;
+  iexpr nextExpression = null;
+  icompop op;
+  boolean isNot = false;
+  ArrayList<icompop> operators = null;
+  ArrayList<iexpr> comparators = null;
+} {
+  expression = bitwiseOr()
+  ((
+  <EQ> { op = Eq$.MODULE$; }
+| <NEQ> { op = NotEq$.MODULE$; }
+| <LT> { op = Lt$.MODULE$; }
+| <LTE> { op = LtE$.MODULE$; }
+| <GT> { op = Gt$.MODULE$; }
+| <GTE> { op = GtE$.MODULE$; }
+| <IS> (<NOT>{ isNot = true; })? { op = isNot ? IsNot$.MODULE$:Is$.MODULE$; }
+| <IN> { op = In$.MODULE$; }
+| <NOT> <IN> { op = NotIn$.MODULE$; }
+  )
+  nextExpression = bitwiseOr() {
+    if (operators == null) {
+      operators = new ArrayList<icompop>();
+    }
+    operators.add(op);
+
+    if (comparators == null) {
+      comparators = new ArrayList<iexpr>();
+    }
+    comparators.add(nextExpression);
+ }
+  )*
+  {
+    if (nextExpression != null) {
+      return new Compare(expression, operators, comparators, attributes(expression, token));
+    } else {
+      return expression;
+    }
+  }
+}
+
+iexpr bitwiseOr(): {
+  iexpr expression;
+  iexpr nextExpression;
+} {
+  expression = bitwiseXor()
+  (
+    <BIT_OR> nextExpression = bitwiseXor()
+    { expression =
+        new BinOp(expression, BitOr$.MODULE$, nextExpression, attributes(expression, token)); }
+  )*
+  {
+    return expression;
+  }
+}
+
+iexpr bitwiseXor(): {
+  iexpr expression;
+  iexpr nextExpression;
+} {
+  expression = bitwiseAnd()
+  (
+    <BIT_XOR> nextExpression = bitwiseAnd()
+    { expression =
+        new BinOp(expression, BitXor$.MODULE$, nextExpression, attributes(expression, token)); }
+  )*
+  {
+    return expression;
+  }
+}
+
+iexpr bitwiseAnd(): {
+  iexpr expression;
+  iexpr nextExpression;
+} {
+  expression = shiftExpr()
+  (
+    <BIT_AND> nextExpression = shiftExpr()
+    { expression =
+        new BinOp(expression, BitAnd$.MODULE$, nextExpression, attributes(expression, token)); }
+  )*
+  {
+    return expression;
+  }
+}
+
+iexpr shiftExpr(): {
+  iexpr expr;
+  iexpr nextExpr;
+  ioperator op;
+} {
+  expr = sum()
+  (
+    (<LSHIFT> { op = LShift$.MODULE$; } | <RSHIFT> { op = RShift$.MODULE$; })
+    nextExpr = sum()
+    { expr = new BinOp(expr, op, nextExpr, attributes(expr, token)); }
+  )*
+  { return expr; }
+}
+
+iexpr sum(): {
+  iexpr expr;
+  iexpr nextExpr;
+  ioperator op;
+} {
+  expr = term()
+  (
+    (<PLUS> { op = Add$.MODULE$; } | <MINUS> { op = Sub$.MODULE$; })
+    nextExpr = term()
+    { expr = new BinOp(expr, op, nextExpr, attributes(expr, token)); }
+  )*
+  { return expr; }
+}
+
+iexpr term(): {
+  iexpr expr;
+  iexpr nextExpr;
+  ioperator op;
+} {
+  expr = factor()
+  (
+    (
+      <STAR> { op = Mult$.MODULE$; }
+    | <DIV> { op = Div$.MODULE$; }
+    | <FLOOR_DIV> { op = FloorDiv$.MODULE$; }
+    | <MOD> { op = Mod$.MODULE$; }
+    | <AT> { op = MatMult$.MODULE$; }
+    )
+    nextExpr = factor()
+    { expr = new BinOp(expr, op, nextExpr, attributes(expr, token)); }
+  )*
+  { return expr; }
+}
+
+iexpr factor(): {
+  Token startToken;
+  iexpr expr;
+  iunaryop op;
+} {
+  (
+  (
+    (
+      <PLUS> { op = UAdd$.MODULE$; }
+    | <MINUS> { op = USub$.MODULE$; }
+    | <INVERT> { op = Invert$.MODULE$; }
+    )
+    { startToken = token; }
+    expr = factor()
+    { expr = new UnaryOp(op, expr, attributes(startToken, token)); }
+  )
+| expr = power()
+  )
+  { return expr; }
+}
+
+iexpr power(): {
+  iexpr expr;
+  iexpr exponentExpr;
+} {
+  expr = awaitPrimary()
+  (
+    <DOUBLE_STAR> exponentExpr = factor()
+    { expr = new BinOp(expr, Pow$.MODULE$, exponentExpr, attributes(expr, token)); }
+  )?
+  { return expr; }
+}
+
+iexpr awaitPrimary(): {
+  iexpr expr;
+} {
+  expr = primary() { return expr; }
+| <AWAIT> expr = primary() { return new Await(expr); }
+}
+
+iexpr primary(): {
+  iexpr expression;
+  ArrayList<iexpr> posArgs;
+  ArrayList<Keyword> keyArgs;
+  iexpr sliceExpression;
+} {
+  expression = atom()
+  (
+    (
+      <PAREN_OPEN> { posArgs = new ArrayList<iexpr>(); keyArgs = new ArrayList<Keyword>(); }
+      arguments(posArgs, keyArgs)
+      <PAREN_CLOSE>
+      { expression = new Call(expression, posArgs, keyArgs, attributes(expression, token)); }
+    )
+  | (
+      <SQUARE_OPEN>
+      sliceExpression = slices()
+      <SQUARE_CLOSE>
+      { expression = new Subscript(expression, sliceExpression, attributes(expression, token)); }
+    )
+  | (
+      <DOT> <NAME> { expression = new Attribute(expression, token.image, attributes(expression, token)); }
+    )
+  )*
+  { return expression; }
+}
+
+// Does no sanity checks like only allowing one GeneratorExp argument or only allowing ** after
+// positional arguments. For our purposes thats fine.
+void arguments(ArrayList<iexpr> positionalArgs, ArrayList<Keyword> keywordArgs): {
+} {
+  (
+    argument(positionalArgs, keywordArgs)
+    (
+      LOOKAHEAD(2)
+      <COMMA> argument(positionalArgs, keywordArgs)
+    )*
+    (<COMMA>)?
+  )?
+}
+
+void argument(ArrayList<iexpr> positionalArgs, ArrayList<Keyword> keywordArgs): {
+  iexpr expression;
+  iexpr valueExpression;
+  Token startToken;
+  ArrayList<Comprehension> comprehensions;
+} {
+  (
+    expression = starredExpression() { positionalArgs.add(expression); }
+  | <DOUBLE_STAR> { startToken = token; } expression = expression()
+   { keywordArgs.add(new Keyword((String)null, expression, attributes(startToken, token))); }
+  | expression = expression()
+    ( <ASSIGN> valueExpression = expression()
+      { if (expression instanceof Name) {
+          String keywordName = ((Name)expression).id();
+          keywordArgs.add(new Keyword(keywordName, valueExpression, attributes(expression, token)));
+        } else {
+          throw new ParseException("TODO");
+        }
+      }
+    | <COLON_ASSIGN> valueExpression = expression()
+      { positionalArgs.add(new NamedExpr(expression, valueExpression, attributes(expression, token))); }
+    | comprehensions = forIfClauses()
+      { positionalArgs.add(new GeneratorExp(expression, comprehensions, attributes(expression, token))); }
+    | { positionalArgs.add(expression); }
+    )
+  )
+}
+
+iexpr slices(): {
+  iexpr expression;
+  iexpr nextExpression;
+  ArrayList<iexpr> tupleExpressions = null;
+} {
+  expression = slice()
+  (
+    LOOKAHEAD(2)
+    <COMMA> nextExpression = slice() {
+      if (tupleExpressions == null) {
+        tupleExpressions = new ArrayList<iexpr>();
+        tupleExpressions.add(expression);
+      }
+      if (nextExpression != null) {
+        tupleExpressions.add(nextExpression);
+      }
+    }
+  )*
+  (<COMMA>)?
+  {
+    if (tupleExpressions != null) {
+      return new Tuple(tupleExpressions, attributes(expression, token));
+    } else {
+      return expression;
+    }
+  }
+}
+
+// This rule matches any input in which case null is returned.
+// We do this because the slice grammar cannot by properly handled
+// by a ll(k) grammar.
+iexpr slice(): {
+  iexpr lower = null;
+  iexpr upper = null;
+  iexpr step = null;
+  Token startToken = null;
+} {
+
+  (lower = expression())?
+  (<COLON>{ startToken = token; } (upper = expression())? (<COLON> (step = expression())?)?)?
+  {
+    if (startToken != null) {
+      if (lower != null) {
+        return new Slice(lower, upper, step, attributes(lower, token));
+      } else {
+        return new Slice(lower, upper, step, attributes(startToken, token));
+      }
+    } else {
+      return lower;
+    }
+  }
+}
+
+iexpr starredExpression(): {
+  iexpr value;
+  Token startToken;
+} {
+  <STAR> { startToken = token; }
+  value = expression()
+  {
+    return new Starred(value, attributes(startToken, token));
+  }
+}
+
+iexpr starredBitwiseOr(): {
+  iexpr value;
+  Token startToken;
+} {
+  <STAR> { startToken = token; }
+  value = bitwiseOr()
+  {
+    return new Starred(value, attributes(startToken, token));
+  }
+}
+
+iexpr atom(): {
+  iexpr expression;
+} {
+  <NAME> { return new Name(token.image, attributes(token, token)); }
+| <TRUE> { return new Constant(new BoolConstant(true), attributes(token, token)); }
+| <FALSE> { return new Constant(new BoolConstant(false), attributes(token, token)); }
+| <NONE> { return new Constant(NoneConstant$.MODULE$, attributes(token, token)); }
+| <ELLIPSIS> { return new Constant(EllipsisConstant$.MODULE$, attributes(token, token)); }
+| expression = number() { return expression; }
+| expression = strings() { return expression; }
+| expression = listOrListComprehension() { return expression; }
+| expression = tupleOrGeneratorExpOrGroup() { return expression; }
+| expression = setOrDictOrSetCompOrDictComp() { return expression; }
+}
+
+Constant number(): {
+} {
+  (
+    (
+      (<DEC_INTEGER> | <BIN_INTEGER> | <OCT_INTEGER> | <HEX_INTEGER>)
+      { return new Constant(new IntConstant(token.image), attributes(token, token)); }
+    )
+  | (
+      <FLOAT>
+      { return new Constant(new FloatConstant(token.image), attributes(token, token)); }
+    )
+  | (
+      <IMAGINARY>
+      { return new Constant(new ImaginaryConstant(token.image), attributes(token, token)); }
+    )
+  )
+}
+
+iexpr strings(): {
+  iexpr expr;
+  ArrayList<iexpr> strings = null;
+} {
+  expr = string()
+  (
+    {
+      if (strings == null) {
+        strings = new ArrayList<iexpr>();
+        strings.add(expr);
+      }
+    }
+    expr = string() { strings.add(expr); }
+  )*
+  {
+    if (strings == null) {
+      return expr;
+    } else {
+      return new StringExpList(strings);
+    }
+  }
+}
+
+iexpr string(): {
+  Token startToken = null;
+  Token formatStartToken;
+  String prefix = "";
+  String quote;
+  String content;
+  ArrayList<iexpr> values;
+  FormattedValue formattedValue;
+} {
+  (
+    (<STRING_PREFIX> { prefix = token.image; startToken = token; })?
+    <STRING_QUOTE_OPEN> { quote = token.image; if (startToken == null) startToken = token; }
+    <STRING_CONTENT> { content = token.image; }
+    // The lexer does not emit corresponding STRING_QUOTE_CLOSE since we do not need any
+    // information from it. The closing quote was lexed together with the string content
+    // and than cut off so that the string content token end position currently also
+    // contains the quotes.
+  )
+  {
+    return new Constant(new StringConstant(content, quote, prefix),
+    attributes(startToken, token));
+  }
+| (
+    (<FORMAT_STRING_PREFIX> )
+    { prefix = token.image; formatStartToken = token; values = new ArrayList<iexpr>(); }
+    <FORMAT_STRING_QUOTE_OPEN> { quote = token.image; }
+    <FORMAT_STRING_CONTENT> {
+      if (!token.image.equals("")) {
+        Constant constant = new Constant(new JoinedStringConstant(token.image), attributes(token, token));
+        values.add(constant);
+      }
+    }
+    (
+      formattedValue = replacementField()
+      { values.add(formattedValue); }
+      <FORMAT_STRING_CONTENT> {
+        if (!token.image.equals("")) {
+          Constant constant = new Constant(new JoinedStringConstant(token.image), attributes(token, token));
+          values.add(constant);
+        }
+      }
+    )*
+    <FORMAT_STRING_QUOTE_CLOSE>
+  )
+  {
+    return new JoinedString(values, quote, prefix, attributes(formatStartToken, token));
+  }
+}
+
+FormattedValue replacementField(): {
+  Token startToken;
+  iexpr expression;
+  boolean equalSign = false;
+  int conversion = -1;
+  String formatSpec = null;
+} {
+    <FORMAT_STRING_CURLY_OPEN> { startToken = token; }
+    (
+      expression = starConditionalExpressions()
+    | expression = yieldExpression()
+    )
+    (<ASSIGN> { equalSign = true; })?
+    (
+      <STR_CONVERSION> { conversion = 115; }
+    | <REPR_CONVERSION> { conversion = 114; }
+    | <ASCII_CONVERSION> { conversion = 97; }
+    )?
+    (<COLON> <FORMAT_SPEC> { formatSpec = token.image; })?
+    <CURLY_CLOSE>
+    {
+      return new FormattedValue(expression, conversion, formatSpec, equalSign, attributes(startToken, token));
+    }
+}
+
+// Returns a tuple for multiple targets and single target with trailing comma.
+// Otherwise returns the single target expression.
+iexpr starTargets(): {
+  ArrayList<iexpr> targets = null;
+  iexpr firstTarget;
+  iexpr target;
+} {
+  firstTarget = starTarget()
+  (LOOKAHEAD(2)
+    <COMMA>
+    {
+      if (targets == null) {
+        targets = new ArrayList<iexpr>();
+        targets.add(firstTarget);
+      }
+    }
+    target = starTarget() { targets.add(target); }
+  )*
+  (<COMMA>)?
+  {
+    if (targets == null && token.kind != COMMA) {
+      // Single target no trailing comma.
+      return firstTarget;
+    }
+    if (targets == null) {
+      // Single target, trailing comma.
+      targets = new ArrayList<iexpr>();
+      targets.add(firstTarget);
+    }
+    return new Tuple(targets, attributes(firstTarget, token));
+  }
+}
+
+// This is not as restrictive as the corresponding CPython 3.9 star_target rule
+// because we except a primary as target which includes e.g. number literals
+// which would be invalid Python code.
+iexpr starTarget(): {
+  boolean starred = false;
+  Token startToken = null;
+  iexpr targetExpr;
+  iexpr baseExpr;
+  iexpr sliceExpr;
+} {
+  (<STAR> { starred = true; startToken = token; })?
+  targetExpr = primary()
+  {
+    if (starred) {
+      return new Starred(targetExpr, attributes(startToken, token));
+    } else {
+      return targetExpr;
+    }
+  }
+}
+
+iexpr listOrListComprehension(): {
+  Token startToken;
+  iexpr expr = null;
+  ArrayList<Comprehension> comprehensions = null;
+  ArrayList<iexpr> expressions = null;
+} {
+  <SQUARE_OPEN> { startToken = token; }
+  (
+    (
+      (expr = namedExpression() | expr = starredBitwiseOr())
+      (
+        (comprehensions = forIfClauses())
+      |
+        (
+          {
+            expressions = new ArrayList<iexpr>();
+            expressions.add(expr);
+          }
+          (LOOKAHEAD(2)
+            <COMMA>
+            (expr = namedExpression() | expr = starredBitwiseOr()) { expressions.add(expr); }
+          )*
+          (<COMMA>)?
+        )
+      )
+    )
+  | { expressions = new ArrayList<iexpr>(); }
+  )
+  <SQUARE_CLOSE>
+  {
+    if (comprehensions == null) {
+      return new List(expressions, attributes(startToken, token));
+    } else {
+      return new ListComp(expr, comprehensions, attributes(startToken, token));
+    }
+  }
+}
+
+iexpr tupleOrGeneratorExpOrGroup(): {
+  Token startToken;
+  iexpr yieldExpr = null;
+  iexpr expr = null;
+  ArrayList<Comprehension> comprehensions = null;
+  ArrayList<iexpr> expressions = null;
+  boolean isTuple = false;
+} {
+  <PAREN_OPEN> { startToken = token; }
+  (
+    (yieldExpr = yieldExpression())
+  | (
+      (expr = namedExpression() | expr = starredBitwiseOr())
+      (
+        (comprehensions = forIfClauses())
+      |
+        (
+          {
+            expressions = new ArrayList<iexpr>();
+            expressions.add(expr);
+          }
+          (LOOKAHEAD(2)
+            <COMMA>
+            (expr = namedExpression() | expr = starredBitwiseOr())
+            { expressions.add(expr); isTuple = true; }
+          )*
+          (<COMMA> { isTuple = true; })?
+        )
+      )
+    )
+  | { expressions = new ArrayList<iexpr>(); isTuple = true; }
+  )
+  <PAREN_CLOSE>
+  {
+    if (yieldExpr != null) {
+      return yieldExpr;
+    } else if (comprehensions != null) {
+      return new GeneratorExp(expr, comprehensions, attributes(startToken, token));
+    } else if (isTuple) {
+      return new Tuple(expressions, attributes(startToken, token));
+    } else {
+      return expr;
+    }
+  }
+}
+
+iexpr setOrDictOrSetCompOrDictComp(): {
+
+  Token startToken;
+  iexpr dictKeyOrSetValueExpr = null;
+  iexpr doubleStarExpr = null;
+  iexpr dictValueExpr = null;
+  ArrayList<iexpr> keyExpressions = new ArrayList<iexpr>();
+  ArrayList<iexpr> valueExpressions = new ArrayList<iexpr>();
+  ArrayList<Comprehension> comprehensions = null;
+  // If isSet is false it is a dict.
+  boolean isSet = true;
+} {
+  <CURLY_OPEN> { startToken = token; }
+  (
+    (
+      (
+        dictKeyOrSetValueExpr = expression()
+      | dictKeyOrSetValueExpr = starredBitwiseOr()
+      | (<DOUBLE_STAR> doubleStarExpr = expression() { isSet = false; })
+      )
+      (
+        <COLON> dictValueExpr = expression()
+        {
+          if (doubleStarExpr != null) {
+            throw new ParseException("TODO");
+          }
+          isSet = false;
+        }
+      )?
+      (
+        (comprehensions = forIfClauses())
+      | (
+          {
+            keyExpressions = new ArrayList<iexpr>();
+            valueExpressions = new ArrayList<iexpr>();
+            if (dictKeyOrSetValueExpr != null) {
+              keyExpressions.add(dictKeyOrSetValueExpr);
+            }
+            if (dictValueExpr != null) {
+              valueExpressions.add(dictValueExpr);
+            }
+            if (doubleStarExpr != null) {
+              keyExpressions.add(null);
+              valueExpressions.add(doubleStarExpr);
+            }
+          }
+          (LOOKAHEAD(2)
+            <COMMA>
+            (
+              (
+                dictKeyOrSetValueExpr = expression()
+                { keyExpressions.add(dictKeyOrSetValueExpr); doubleStarExpr = null;}
+              )
+            | (
+                dictKeyOrSetValueExpr = starredBitwiseOr()
+                { keyExpressions.add(dictKeyOrSetValueExpr); doubleStarExpr = null;}
+              )
+            | (
+                <DOUBLE_STAR> doubleStarExpr = expression()
+                {
+                  if (isSet) {
+                    throw new ParseException("TODO");
+                  }
+                  keyExpressions.add(null);
+                  valueExpressions.add(doubleStarExpr);
+                }
+              )
+            )
+            (
+              (
+                <COLON> dictValueExpr = expression()
+                {
+                  if (isSet) {
+                    throw new ParseException("TODO");
+                  }
+                  valueExpressions.add(dictValueExpr);
+                }
+              )
+            | {
+                if (!isSet && doubleStarExpr == null) {
+                  throw new ParseException("TODO");
+                }
+              }
+            )
+          )*
+          (<COMMA>)?
+        )
+      )
+    )
+  | {}
+  )
+  <CURLY_CLOSE>
+  {
+    if (isSet) {
+      if (comprehensions == null) {
+        return new Set(keyExpressions, attributes(startToken, token));
+      } else {
+        return new SetComp(dictKeyOrSetValueExpr, comprehensions, attributes(startToken, token));
+      }
+    } else {
+      if (comprehensions == null) {
+        return new Dict(keyExpressions, valueExpressions, attributes(startToken, token));
+      } else {
+        if (doubleStarExpr != null) {
+          throw new ParseException("TODO");
+        }
+        return new DictComp(dictKeyOrSetValueExpr, dictValueExpr, comprehensions,
+         attributes(startToken, token));
+      }
+    }
+  }
+}
+
+ArrayList<Comprehension> forIfClauses(): {
+  ArrayList<Comprehension> comprehensions = new ArrayList<Comprehension>();
+  Comprehension comprehension;
+} {
+  (comprehension = forIfClause() { comprehensions.add(comprehension); })+
+  { return comprehensions; }
+}
+
+Comprehension forIfClause(): {
+  boolean isAsync = false;
+  iexpr target;
+  iexpr iter;
+  ArrayList<iexpr> ifs = new ArrayList<iexpr>();
+  iexpr ifExpr;
+} {
+  (<ASYNC> { isAsync = true; })?
+  <FOR>
+  target = starTargets()
+  <IN>
+  iter = disjunction()
+  (<IF> ifExpr = disjunction() { ifs.add(ifExpr); })*
+  { return new Comprehension(target, iter, ifs, isAsync); }
+}
+

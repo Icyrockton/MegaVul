@@ -1,0 +1,15 @@
+proxy:
+  enable: true
+  http_url: http://172.31.112.1:7890
+  https_url: http://172.31.112.1:7890
+
+dependencies:
+  java: /home/icy/.sdkman/candidates/java/current/bin
+  scala: /home/icy/.sdkman/candidates/scala/current/bin
+  sbt: /home/icy/.sdkman/candidates/sbt/current/bin
+  node: /usr/local/node/bin
+  tree-sitter: /usr/local/tree-sitter
+  github-linguist: /usr/local/bin/github-linguist
+
+log_level:
+  INFO # [DEBUG, INFO, WARNING, ERROR]

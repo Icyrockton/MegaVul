@@ -1,0 +1,89 @@
+name: pr
+on: pull_request
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          fetch-depth: 1
+      - name: Set up JDK
+        uses: actions/setup-java@v3
+        with:
+          distribution: 'temurin'
+          java-version: '19'
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: 2.7
+      - name: Set up Go
+        uses: actions/setup-go@v2
+        with:
+          go-version: 1.18
+      - name: Install Bundler
+        run: gem install bundler
+      - name: Delete `.rustup` directory
+        run: rm -rf /home/runner/.rustup # to save disk space
+        if: runner.os == 'Linux'
+      - name: Delete `.cargo` directory # to save disk space
+        run: rm -rf /home/runner/.cargo
+        if: runner.os == 'Linux'
+      - uses: actions/cache@v3
+        with:
+          path: |
+            ~/.sbt
+            ~/.coursier
+          key: ${{ runner.os }}-sbt-${{ hashfiles('**/build.sbt') }}
+      - name: Compile and run tests
+        run: sbt clean +test
+  formatting:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          fetch-depth: 1
+      - name: Set up JDK
+        uses: actions/setup-java@v3
+        with:
+          distribution: 'temurin'
+          java-version: '19'
+      - uses: actions/cache@v3
+        with:
+          path: |
+            ~/.sbt
+            ~/.coursier
+          key: ${{ runner.os }}-sbt-${{ hashfiles('**/build.sbt') }}
+      - name: Check formatting
+        run: sbt scalafmtCheck Test/scalafmtCheck
+      - run: echo "Previous step failed because code is not formatted. Run 'sbt scalafmt Test/scalafmt'"
+        if: ${{ failure() }}
+  test-scripts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          fetch-depth: 1
+      - name: Set up JDK
+        uses: actions/setup-java@v3
+        with:
+          distribution: 'temurin'
+          java-version: '19'
+      - uses: actions/cache@v3
+        with:
+          path: |
+            ~/.sbt
+            ~/.coursier
+          key: ${{ runner.os }}-sbt-${{ hashfiles('**/build.sbt') }}
+      - run: ./testDistro.sh
+      - run: |
+          mkdir /tmp/foo
+          echo "int foo(int a, int b, int c, int d, int e, int f) {}" > /tmp/foo/foo.c
+          ./joern --src /tmp/foo --run scan
+          ./joern-scan /tmp/foo
+          ./joern-scan --dump
+      - run: |
+          cd joern-cli/target/universal/stage
+          ./schema-extender/test.sh
