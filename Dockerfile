@@ -2,7 +2,7 @@ FROM ubuntu:22.04 as vul4c_base
 LABEL authors="Vul4C" description="Out-of-the-box dependency environment for Vul4C" version="1.0"
 RUN  apt-get clean
 RUN apt-get update
-RUN apt-get install -y wget curl build-essential cmake pkg-config libicu-dev zlib1g-dev libcurl4-openssl-dev libssl-dev ruby-dev ca-certificates curl gnupg git
+RUN apt-get install -y wget curl build-essential cmake pkg-config libicu-dev zlib1g-dev libcurl4-openssl-dev libssl-dev ruby-dev ca-certificates curl gnupg git vim
 
 # nodejs
 RUN curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg

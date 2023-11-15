@@ -102,8 +102,12 @@ with Path("path_to_vul4c/vul4c_simple.json").open(mode='r') as f:
 - Python 3.11+
 - 100GB+ free space
 - **6+** GitHub tokens (more is better)
+- We offer two ways to install dependencies
+  1. [Manually install](#Install-dependencies-manually)
+  2. [Out-of-box docker image](#Docker-image)
 
-### Install python environment
+### Install dependencies manually
+#### Install python environment
 
 You can choose one of the following three methods to install python dependencies.
 
@@ -124,7 +128,7 @@ source .vul4c-env/bin/activate
 pip install -r requirements.txt
 ```
 
-### Install other dependencies
+#### Install other dependencies
 
 - [Node.js](https://nodejs.org/) and [Tree-sitter](https://tree-sitter.github.io/) are used to separate functions from files. 
 - [Java 17+](https://jdk.java.net/21/), [Scala 3.2.2](https://www.scala-lang.org/), [sbt 1.8.2](https://www.scala-sbt.org/) and [Joern](https://joern.io/) to extract the graph of the function. 
@@ -153,7 +157,18 @@ gem install github-linguist
 which github-linguist
 ```
 
-### Other preparations
+### Docker image
+
+We provide out-of-box docker image, pull it and run Vul4C straight away!
+```shell
+docker pull icyrockton/vul4c
+docker run -it icyrockton/vul4c
+(vul4c) root@8345683f69d9:/Vul4C#: vim vul4c/config.yaml
+(vul4c) root@8345683f69d9:/Vul4C#: vim vul4c/github_token.txt
+(vul4c) root@8345683f69d9:/Vul4C#: python vul4c/main.py
+```
+
+### Config file preparations
 
 Configuration items **need to be filled** in `vul4c/config.yaml` and `vul4c/github_token.txt`.
 
