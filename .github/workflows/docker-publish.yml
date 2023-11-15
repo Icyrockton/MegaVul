@@ -1,0 +1,31 @@
+name: Docker 
+
+on:
+  push:
+    branches: [ "main" ]
+    paths-ignore: 
+      - "examples/**"
+      - "img/**"
+      - "README.md"
+      - "LICENSE"
+      - ".gitignore"
+
+jobs:
+
+  build:
+
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v3
+    - name: docker login
+      env:
+        DOCKER_USER: ${{secrets.DOCKER_USER}}
+        DOCKER_PASSWORD: ${{secrets.DOCKER_PASSWORD}}
+      run: |
+        docker login -u $DOCKER_USER -p $DOCKER_PASSWORD 
+    - name: Build the Docker image
+      run: docker build . --file Dockerfile --tag vul4c
+      
+    - name: Docker Push
+      run: docker push icyrockton/vul4c
