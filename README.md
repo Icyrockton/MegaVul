@@ -6,7 +6,7 @@
 # Vul4C 📦
 > The largest, high-quality, extensible, continuously updated, C/C++ function-level vulnerability dataset.
 
-With over **17,000** identified vulnerable functions and **320,000** non-vulnerable functions,
+With over **17,000** identified vulnerable functions and **320,000** non-vulnerable functions extracted from **9,019** vulnerability fix commits,
 Vul4C provides multi-dimensional data to help you train state-of-the-art **sequence-based** or **graph-based**
 vulnerability detectors.
 
