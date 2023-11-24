@@ -38,7 +38,7 @@ functions.
 The differences between the three versions are as follows:
 
 - `cve_with_graph_abstract_commit.json` Raw dataset with complete hierarchical structure. It includes information
-  such as CVE, Commit, File, Functions, etc.
+  such as CVE, Commit, :wqFile, Functions, etc.
 - `vul4c.json` is a version of `cve_with_graph_abstract_commit` after flattened, for easier use. Keep all
   fields but losing the hierarchical structure.
 - `vul4c_simple.json` is a simple version of `vul4c.json`, designed to provide a more concise representation of the
