@@ -37,9 +37,9 @@ functions.
 
 The differences between the three versions are as follows:
 
-- `cve_with_parsed_filtered_graph_commit.json` Raw dataset with complete hierarchical structure. It includes information
+- `cve_with_graph_abstract_commit.json` Raw dataset with complete hierarchical structure. It includes information
   such as CVE, Commit, File, Functions, etc.
-- `vul4c.json` is a version of `cve_with_parsed_filtered_graph_commit` after flattened, for easier use. Keep all
+- `vul4c.json` is a version of `cve_with_graph_abstract_commit` after flattened, for easier use. Keep all
   fields but losing the hierarchical structure.
 - `vul4c_simple.json` is a simple version of `vul4c.json`, designed to provide a more concise representation of the
   dataset. It retains essential fields such as Functions and CVE IDs while omitting detail information like function parameter
@@ -51,7 +51,7 @@ It is provided separately to save bandwidth and storage space (unzipping require
 
 ### 🔗 Download Dataset
 [Download from Cloud Drive](https://1drv.ms/f/s!AtzrzuojQf5sgeISZ9zN_4owVnUn9g)
-1. `cve_with_parsed_filtered_graph_commit`
+1. `cve_with_graph_abstract_commit`
 2. `vul4c.json`
 3. `vul4c_simple.json`
 4. `vul4c_graph.zip`
@@ -296,7 +296,7 @@ class Vul4CSimpleFunction:
     is_vul: bool
 ```
 
-2. `vul4c.json` is the version after `cve_with_parsed_filtered_graph_commit` flattened.
+2. `vul4c.json` is the version after `cve_with_graph_abstract_commit` flattened.
 
 ```python
 @dataclass
@@ -342,7 +342,7 @@ class Vul4CFunction:
     is_vul: bool
 ```
 
-3. `cve_with_parsed_filtered_graph_commit.json` provides the following hierarchical structure, which is raw
+3. `cve_with_graph_abstract_commit.json` provides the following hierarchical structure, which is raw
    state of the dataset. 
 The following classes are defined in the [`vul4c/git_platform/common.py`](vul4c/git_platform/common.py)
 - `CveWithCommitInfo`
