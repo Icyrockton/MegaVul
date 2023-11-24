@@ -5,6 +5,6 @@ setup(
     version='0.0.1',
     description="A Continuously Updated C/C++ Function-Level Vulnerability Dataset",
     packages=['vul4c'],
-    license='MIT License',
+    license='GPL License',
     python_requires='>=3.11',
 )
