@@ -351,6 +351,8 @@ The following classes are defined in the [`vul4c/git_platform/common.py`](vul4c/
 - `VulnerableFunction`
 - `NonVulnerableFunction`
 
+![schema overview](./img/schema.svg "Vul4C Hierarchical Schema")
+
 
 
 #### Graph Specification
@@ -510,4 +512,4 @@ If you use Vul4C for your research, please cite our paper:
 
 ### License
 
-Vul4C is licensed under the MIT, as found in the [LICENSE](LICENSE) file.
+Vul4C is licensed under the GPL 3.0, as found in the [LICENSE](LICENSE) file.
