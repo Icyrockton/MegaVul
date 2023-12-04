@@ -1,13 +1,13 @@
 <p align="center">
-  <img height="180" src="./img/vul4c_logo.svg"  alt="Vul4C Logo"/>
+  <img height="180" src="./img/megavul_logo.svg"  alt="MegaVul Logo"/>
 </p>
 
 
-# Vul4C 📦
+# MegaVul 📦
 > The largest, high-quality, extensible, continuously updated, C/C++ function-level vulnerability dataset.
 
 With over **17,000** identified vulnerable functions and **320,000** non-vulnerable functions extracted from **9,000** vulnerability fix commits,
-Vul4C provides multi-dimensional data to help you train state-of-the-art **sequence-based** or **graph-based**
+MegaVul provides multi-dimensional data to help you train state-of-the-art **sequence-based** or **graph-based**
 vulnerability detectors.
 
 Table of Contents
@@ -32,7 +32,7 @@ Table of Contents
 
 ## Getting Started
 
-We offer **three** versions of the pre-crawled **Vul4C**, as well as providing Joern graphs extracted from all
+We offer **three** versions of the pre-crawled **MegaVul**, as well as providing Joern graphs extracted from all
 functions.
 
 The differences between the three versions are as follows:
@@ -45,13 +45,13 @@ The differences between the three versions are as follows:
   dataset. It retains essential fields such as Functions and CVE IDs while omitting detail information like function parameter
   lists and commit message.
 
-The **vul4c_graph.zip** provides Joern graphs for all functions in the **Vul4C**, including node and edge information. (Mostly
+The **vul4c_graph.zip** provides Joern graphs for all functions in the **MegaVul**, including node and edge information. (Mostly
 used for **graph-based** vulnerability detect neural networks)
 It is provided separately to save bandwidth and storage space (unzipping requires around **20GB** of free space), and only about 87% of functions successfully generate graphs. 
 
 ### 🔗 Download Dataset
 [Download from Cloud Drive](https://1drv.ms/f/s!AtzrzuojQf5sgeISZ9zN_4owVnUn9g)
-1. `cve_with_graph_abstract_commit`
+1. `cve_with_graph_abstract_commit.json`
 2. `vul4c.json`
 3. `vul4c_simple.json`
 4. `vul4c_graph.zip`
@@ -159,7 +159,7 @@ which github-linguist
 
 ### Docker image
 
-We provide out-of-box docker image, pull it and run Vul4C straight away!
+We provide out-of-box docker image, pull it and run MegaVul straight away!
 ```shell
 docker pull icyrockton/vul4c
 docker run -it icyrockton/vul4c
