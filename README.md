@@ -39,22 +39,22 @@ The differences between the three versions are as follows:
 
 - `cve_with_graph_abstract_commit.json` Raw dataset with complete hierarchical structure. It includes information
   such as CVE, Commit, :wqFile, Functions, etc.
-- `vul4c.json` is a version of `cve_with_graph_abstract_commit` after flattened, for easier use. Keep all
+- `megavul.json` is a version of `cve_with_graph_abstract_commit` after flattened, for easier use. Keep all
   fields but losing the hierarchical structure.
-- `vul4c_simple.json` is a simple version of `vul4c.json`, designed to provide a more concise representation of the
+- `megavul_simple.json` is a simple version of `megavul.json`, designed to provide a more concise representation of the
   dataset. It retains essential fields such as Functions and CVE IDs while omitting detail information like function parameter
   lists and commit message.
 
-The **vul4c_graph.zip** provides Joern graphs for all functions in the **MegaVul**, including node and edge information. (Mostly
+The **megavul_graph.zip** provides Joern graphs for all functions in the **MegaVul**, including node and edge information. (Mostly
 used for **graph-based** vulnerability detect neural networks)
 It is provided separately to save bandwidth and storage space (unzipping requires around **20GB** of free space), and only about 87% of functions successfully generate graphs. 
 
 ### 🔗 Download Dataset
 [Download from Cloud Drive](https://1drv.ms/f/s!AtzrzuojQf5sgeISZ9zN_4owVnUn9g)
 1. `cve_with_graph_abstract_commit.json`
-2. `vul4c.json`
-3. `vul4c_simple.json`
-4. `vul4c_graph.zip`
+2. `megavul.json`
+3. `megavul_simple.json`
+4. `megavul_graph.zip`
 
 ### ⏩ Simple UseCase
 
@@ -62,16 +62,16 @@ Refer [specification](#dataset-specification) for more information about the **f
 
 More code examples can be found in the `examples` folder.
 
-The following code reads `vul4c_simple.json`
+The following code reads `megavul_simple.json`
 
 ```python
 import json
 from pathlib import Path
-graph_dir = Path('path_to_graph/graph')
+graph_dir = Path('../megavul/storage/result/graph')
 
-with Path("path_to_vul4c/vul4c_simple.json").open(mode='r') as f:
-    vul4c = json.load(f)
-    item = vul4c[9]
+with Path("../megavul/storage/result/megavul_simple.json").open(mode='r') as f:
+    megavul = json.load(f)
+    item = megavul[9]
     cve_id = item['cve_id'] # CVE-2022-24786
     cvss_vector = item['cvss_vector']   # AV:N/AC:L/Au:N/C:P/I:P/A:P
     is_vul = item['is_vul'] # True
@@ -84,13 +84,12 @@ with Path("path_to_vul4c/vul4c_simple.json").open(mode='r') as f:
     diff_line_info = item['diff_line_info'] # {'deleted_lines': ['pjmedia_rtcp_comm .... ] , 'added_lines': [ .... ] }
     git_url = item['git_url']   # https://github.com/pjsip/pjproject/commit/11559e49e65bdf00922ad5ae28913ec6a198d508
 
-    if item['func_graph_path_before'] is not None:  # graphs of some functions cannot be exported successfully
+    if item['func_graph_path_before'] is not None: # graphs of some functions cannot be exported successfully
         graph_file_path = graph_dir / item['func_graph_path_before']
         graph_file = json.load(graph_file_path.open(mode='r'))
         nodes, edges = graph_file['nodes'] , graph_file['edges']
         print(nodes)    # [{'version': '0.1', 'language': 'NEWC', '_label': 'META_DATA', 'overlays': ....
-        print(edges)    # [{'inNode': 196, 'outNode': 2, 'etype': 'AST', 'variable': None}, ...]
-
+        print(edges)    # [{'innode': 196, 'outnode': 2, 'etype': 'AST', 'variable': None}, ...]
 ```
 
 ------
@@ -123,8 +122,8 @@ pip install -r requirements.txt
 
 - Install from python venv
 ```shell
-python -m venv .vul4c-env
-source .vul4c-env/bin/activate
+python -m venv .megavul-env
+source .megavul-env/bin/activate
 pip install -r requirements.txt
 ```
 
@@ -161,16 +160,16 @@ which github-linguist
 
 We provide out-of-box docker image, pull it and run MegaVul straight away!
 ```shell
-docker pull icyrockton/vul4c
-docker run -it icyrockton/vul4c
-(vul4c) root@8345683f69d9:/Vul4C#: vim vul4c/config.yaml
-(vul4c) root@8345683f69d9:/Vul4C#: vim vul4c/github_token.txt
-(vul4c) root@8345683f69d9:/Vul4C#: python vul4c/main.py
+docker pull icyrockton/megavul
+docker run -it icyrockton/megavul
+(megavul) root@8345683f69d9:/MegaVul#: vim megavul/config.yaml
+(megavul) root@8345683f69d9:/MegaVul#: vim megavul/github_token.txt
+(megavul) root@8345683f69d9:/MegaVul#: python megavul/main.py
 ```
 
 ### Config file preparations
 
-Configuration items **need to be filled** in `vul4c/config.yaml` and `vul4c/github_token.txt`.
+Configuration items **need to be filled** in `megavul/config.yaml` and `megavul/github_token.txt`.
 
 Generate GitHub RESTful token
 1. https://github.com/settings/tokens
@@ -207,20 +206,20 @@ ghp_xxxx22222
 
 ![pipeline overview](./img/megavul_pipeline.svg "MegaVul Pipeline Overview")
 
-Install vul4c as a python module
+Install megavul as a python module
 ```shell
 pip install -e .
 ```
 
-Runs the dataset collection pipelines for Vul4C
+Runs the dataset collection pipelines for MegaVul
 
 ```python
-python vul4c/main.py
+python megavul/main.py
 ```
 
 ☕ Have a cup of coffee and wait for dataset collection to complete (8 hours+).
 
-Intermediate `json` results are stored into `./vul4c/storage/result`, `./vul4c/storage/cache`.
+Intermediate `json` results are stored into `./megavul/storage/result`, `./megavul/storage/cache`.
 
 ------
 
@@ -228,26 +227,26 @@ Intermediate `json` results are stored into `./vul4c/storage/result`, `./vul4c/s
 
 ### Add more datasource
 
-If you find that some CVEs referenced link website contain potential commits, you can add the parsed commit URLs to [mining_commit_urls_from_reference_urls](https://github.com/Icyrockton/Vul4C/blob/main/vul4c/pipeline/extract_cve_info.py#L90).
+If you find that some CVEs referenced link website contain potential commits, you can add the parsed commit URLs to [mining_commit_urls_from_reference_urls](https://github.com/Icyrockton/MegaVul/blob/main/megavul/pipeline/extract_cve_info.py#L90).
 
 
 ### Add more git platform
 
-All git platforms inherit from [GitPlatformBase](https://github.com/Icyrockton/Vul4C/blob/main/vul4c/git_platform/https://git_platform_base.py/), and you need to implement all of its methods to extend a new git platform.
+All git platforms inherit from [GitPlatformBase](https://github.com/Icyrockton/MegaVul/blob/main/megavul/git_platform/git_platform_base.py/), and you need to implement all of its methods to extend a new git platform.
 
 
 ### Tree-sitter enhance
 
 We have extended the grammar of tree-sitter to recognize more C/C++ macros (e.g. `asmlinkage`, `UNUSED`) from other projects such as linux.
 
-The modified tree-sitter grammar file can be found here: [grammar.js](https://github.com/Icyrockton/Vul4C/blob/main/vul4c/tree-sitter/tree-sitter-c/grammar.js#L482).
+The modified tree-sitter grammar file can be found here: [grammar.js](https://github.com/Icyrockton/MegaVul/blob/main/megavul/tree-sitter/tree-sitter-c/grammar.js#L482).
 
 ### Add more language
 
-Our function separator depends on tree-sitter, such as [ParserC](https://github.com/Icyrockton/Vul4C/blob/main/vul4c/parser/parser_c.py).
+Our function separator depends on tree-sitter, such as [ParserC](https://github.com/Icyrockton/MegaVul/blob/main/megavul/parser/parser_c.py).
 
 If you want to extend function separator for more languages, such as `Java`
-you can use [tree-sitter-java](https://github.com/tree-sitter/tree-sitter-java) to extend [ParserBase](https://github.com/Icyrockton/Vul4C/blob/main/vul4c/parser/parser_base.py).
+you can use [tree-sitter-java](https://github.com/tree-sitter/tree-sitter-java) to extend [ParserBase](https://github.com/Icyrockton/MegaVul/blob/main/megavul/parser/parser_base.py).
 
 
 ## 📚 Appendix
@@ -256,18 +255,18 @@ you can use [tree-sitter-java](https://github.com/tree-sitter/tree-sitter-java) 
 
 #### Dataset Specification
 
-We provide **field** specification for the different versions of Vul4C for easier use (typing support).
+We provide **field** specification for the different versions of MegaVul for easier use (typing support).
 
-You can also find the definition in the `vul4c/git_platform/common.py`, `vul4c/pipeline/flatten_vul4c.py`.
+You can also find the definition in the `megavul/git_platform/common.py`, `megavul/pipeline/flatten_megavul.py`.
 
-1. `vul4c_simple.json` provides the most commonly used fields of the dataset.
+1. `megavul_simple.json` provides the most commonly used fields of the dataset.
    The definitions are as follows
 
 ```python
 from dataclasses import dataclass
 from typing import Optional
 @dataclass
-class Vul4CSimpleFunction:
+class MegaVulSimpleFunction:
     cve_id: str
     cwe_ids: list[str]
     cvss_vector: Optional[str]
@@ -296,11 +295,11 @@ class Vul4CSimpleFunction:
     is_vul: bool
 ```
 
-2. `vul4c.json` is the version after `cve_with_graph_abstract_commit` flattened.
+2. `megavul.json` is the version after `cve_with_graph_abstract_commit` flattened.
 
 ```python
 @dataclass
-class Vul4CFunction:
+class MegaVulFunction:
     cve_id: str
     cwe_ids: list[str]
     cvss_vector: Optional[str]
@@ -344,14 +343,14 @@ class Vul4CFunction:
 
 3. `cve_with_graph_abstract_commit.json` provides the following hierarchical structure, which is raw
    state of the dataset. 
-The following classes are defined in the [`vul4c/git_platform/common.py`](vul4c/git_platform/common.py)
+The following classes are defined in the [`megavul/git_platform/common.py`](megavul/git_platform/common.py)
 - `CveWithCommitInfo`
 - `CommitInfo`
 - `CommitFile`
 - `VulnerableFunction`
 - `NonVulnerableFunction`
 
-![schema overview](./img/schema.svg "Vul4C Hierarchical Schema")
+![schema overview](./img/schema.svg "MegaVul Hierarchical Schema")
 
 
 
@@ -371,7 +370,7 @@ NB: Joern **can't** export DFG(Data Flow Graph) for functions.
 
 ##### Usage
 
-The `func_graph_path`, `func_graph_path_before` in Vul4C provides the relative path to the graph of function, and you
+The `func_graph_path`, `func_graph_path_before` in MegaVul provides the relative path to the graph of function, and you
 need to concatenate the paths to get the final json file.
 
 e.g.
@@ -503,7 +502,7 @@ Definition and reference location of local variables
 
 ### Citation
 
-If you use Vul4C for your research, please cite our paper:
+If you use MegaVul for your research, please cite our MSR(2024) paper:
 
 ```
 @InProceedings{
@@ -512,4 +511,4 @@ If you use Vul4C for your research, please cite our paper:
 
 ### License
 
-Vul4C is licensed under the GPL 3.0, as found in the [LICENSE](LICENSE) file.
+MegaVul is licensed under the GPL 3.0, as found in the [LICENSE](LICENSE) file.
