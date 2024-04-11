@@ -205,7 +205,7 @@ ghp_xxxx22222
 
 ### 🚀 Run the pipelines
 
-![pipeline overview](./img/vul4c_pipeline.svg "Vul4C Pipeline Overview")
+![pipeline overview](./img/megavul_pipeline.svg "MegaVul Pipeline Overview")
 
 Install vul4c as a python module
 ```shell

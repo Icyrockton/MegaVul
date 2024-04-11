@@ -1,5 +1,5 @@
 *.egg-info
-vul4c/storage/cache
-vul4c/storage/logging
-vul4c/storage/result
-vul4c/github_token.txt
+megavul/storage/cache
+megavul/storage/logging
+megavul/storage/result
+megavul/github_token.txt

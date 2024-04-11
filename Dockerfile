@@ -1,5 +1,5 @@
-FROM ubuntu:22.04 as vul4c_base
-LABEL authors="Vul4C" description="Out-of-the-box dependency environment for Vul4C" version="1.0"
+FROM ubuntu:22.04 as megavul_base
+LABEL authors="MegaVul" description="Out-of-the-box dependency environment for MegaVul" version="1.0"
 RUN  apt-get clean
 RUN apt-get update
 RUN apt-get install -y wget curl build-essential cmake pkg-config libicu-dev zlib1g-dev libcurl4-openssl-dev libssl-dev ruby-dev ca-certificates curl gnupg git vim
@@ -31,9 +31,9 @@ ENV PATH=/root/.sdkman/candidates/sbt/current/bin:$PATH
 RUN conda --version &&  npm -v && java --version && scala --version && github-linguist --version && tree-sitter --version
 
 # clone source code and create new conda env
-RUN git clone https://github.com/Icyrockton/Vul4C
-WORKDIR /Vul4C
+RUN git clone https://github.com/Icyrockton/MegaVul
+WORKDIR /MegaVul
 RUN conda env create -f environment.yml
-RUN echo "source activate vul4c" > ~/.bashrc
-ENV PATH=/root/miniconda3/envs/vul4c/bin:$PATH
+RUN echo "source activate megavul" > ~/.bashrc
+ENV PATH=/root/miniconda3/envs/megavul/bin:$PATH
 RUN pip install -e .

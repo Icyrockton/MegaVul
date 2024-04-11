@@ -1,4 +1,4 @@
-name: vul4c
+name: megavul
 channels:
   - defaults
 dependencies:

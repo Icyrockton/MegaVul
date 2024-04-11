@@ -25,7 +25,7 @@ jobs:
       run: |
         docker login -u $DOCKER_USER -p $DOCKER_PASSWORD 
     - name: Build the Docker image
-      run: docker build . --file Dockerfile --tag icyrockton/vul4c
+      run: docker build . --file Dockerfile --tag icyrockton/megavul
       
     - name: Docker Push
-      run: docker push icyrockton/vul4c
+      run: docker push icyrockton/megavul
