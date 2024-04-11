@@ -11,7 +11,7 @@ __all__ = ['global_logger', 'get_child_logger', 'MegaVulLogger']
 class MegaVulLogger:
 
     def __init__(self):
-        logger = logging.getLogger('Vul4C')
+        logger = logging.getLogger('MegaVul')
         logger.setLevel(logging.getLevelNamesMapping()[config_file['log_level']])
 
         # logging file
