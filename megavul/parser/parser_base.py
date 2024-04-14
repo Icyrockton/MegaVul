@@ -4,7 +4,7 @@ from functools import cached_property
 from pathlib import Path
 
 from timeout_decorator import timeout_decorator
-from tree_sitter import Language, Parser, TreeCursor, Tree, Node
+from tree_sitter import Language, Parser, Tree
 
 from megavul.parser.parser_util import ExtractedFunction
 from megavul.util.utils import build_tree_sitter_language, save_marshmallow_dataclass_to_json_file

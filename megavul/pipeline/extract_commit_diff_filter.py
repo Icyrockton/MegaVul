@@ -3,8 +3,9 @@ from abc import ABCMeta, abstractmethod
 from dataclasses import asdict
 from megavul.git_platform.common import CveWithCommitInfo, VulnerableFunction, NonVulnerableFunction, CommitFile, \
     CommitInfo
-from typing import Callable, List, Tuple
+from typing import Callable
 from megavul.util.logging_util import global_logger
+from megavul.util.config import crawling_language, CrawlingType
 import wordsegment
 from dataclasses import dataclass
 
@@ -167,6 +168,19 @@ class TestFileFilter(GlobalFilter):
     """
 
     def should_filter_this_file(self, file: CommitFile) -> bool:
+        if crawling_language == CrawlingType.C_CPP:
+            return self.filter_c_cpp_test_file(file)
+        elif crawling_language == CrawlingType.Java:
+            return self.filter_java_test_file(file)
+
+    def filter_java_test_file(self, file: CommitFile) -> bool:
+        file_name = file.file_path.split('/')[-1].split('.')[0]
+        if file_name.endswith('Test'):
+            return True
+        return False
+
+
+    def filter_c_cpp_test_file(self, file: CommitFile) -> bool:
         file_path = file.file_path
 
         for path in reversed(file_path.split('/')):
@@ -208,7 +222,7 @@ class TestFileFilter(GlobalFilter):
                     if not self.should_filter_this_file(file):
                         new_files.append(file)
                     else:
-                        self._info(f'find test file {file.file_path} in {commit.git_url}')
+                        self._info(f'Find test file {file.file_path} in {commit.git_url}')
 
                 if len(new_files) != 0:
                     commit_infos.append(update_commit_info_with_files(commit, new_files))
@@ -695,6 +709,15 @@ class TestFunctionFilter(LocalFilter):
     """
 
     def my_filter(self, func_name: str) -> bool:
+        if crawling_language == CrawlingType.C_CPP:
+            return self.c_cpp_filter(func_name)
+        elif crawling_language == CrawlingType.Java:
+            # The test methods for java are usually in the `xxxxxTest` file
+            return False
+        else:
+            return False
+
+    def c_cpp_filter(self, func_name: str) -> bool:
         func_name = func_name.split('::')[-1]  # c++ func name
         test_func_prefix = ["START_TEST", "TEST", "DEF_TEST", "IN_PROC_BROWSER_TEST", "BOOST_AUTO_TEST_CASE",
                             "DROGON_TEST", "test", "assert", ]

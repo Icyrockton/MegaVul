@@ -23,7 +23,7 @@ RUN wget \
 
 # java sbt scala
 RUN curl -s "https://get.sdkman.io" | bash
-RUN bash -c "source $HOME/.sdkman/bin/sdkman-init.sh && sdk install java 17.0.6-amzn && sdk install scala 3.2.2 && sdk install sbt 1.8.2"
+RUN bash -c "source $HOME/.sdkman/bin/sdkman-init.sh && sdk install java 17.0.6-amzn && sdk install scala 3.2.2 && sdk install sbt 1.9.9"
 ENV PATH=/root/miniconda3/bin:$PATH
 ENV PATH=/root/.sdkman/candidates/java/current/bin:$PATH
 ENV PATH=/root/.sdkman/candidates/scala/current/bin:$PATH

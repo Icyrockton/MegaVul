@@ -41,6 +41,7 @@ DEPENDENCY_NOT_FOUND_MESSAGE = {
     'github-linguist': "github-linguist not found, please install from https://github.com/github-linguist/linguist/tree/master#installation"
 }
 
+
 def load_dependencies(dependencies: dict[str,str]):
     global DEPENDENCY_NOT_FOUND_MESSAGE
     concat_path = ''
@@ -53,12 +54,13 @@ def load_dependencies(dependencies: dict[str,str]):
             if name in DEPENDENCY_NOT_FOUND_MESSAGE:
                 raise ImportError(DEPENDENCY_NOT_FOUND_MESSAGE[name])
             else:
-                raise ImportError(f"dependency {name} path not found in config.yaml")
+                raise ImportError(f"Dependency {name} path not found in config.yaml")
 
 if 'dependencies' not in config_file:
-    raise RuntimeError("dependencies [java, scala, sbt, node, tree-sitter, github-linguist] missing")
+    raise RuntimeError("Dependencies [java, scala, sbt, node, tree-sitter, github-linguist] missing")
 else:
     load_dependencies(config_file['dependencies'])
+
 
 
 def read_json_from_network(url: str) -> dict:
@@ -245,14 +247,14 @@ def convert_to_jvm_proxy(proxy_dict:dict) -> str:
 
 
 def build_tree_sitter_language(language_name : str, debug_mode = False) -> Language:
-    assert language_name in ['c','cpp'], "only support c/cpp right now, you can modified this assertion to add more language"
+    assert language_name in ['c','cpp','java'], "Only support c/cpp/java right now, you can modified this assertion to add more language"
     # now we only support c/cpp tree-sitter, but you can add more languages
     tree_sitter_name = f'tree-sitter-{language_name}'
     tree_sitter_path = StorageLocation.tree_sitter_dir() / tree_sitter_name
     tree_sitter_so = StorageLocation.result_dir() / 'build' / f'build-{tree_sitter_name}.so'
 
     if not tree_sitter_path.exists() or not (tree_sitter_path / 'grammar.js').exists():
-        raise RuntimeError(f"no tree-sitter source found in {tree_sitter_path}")
+        raise RuntimeError(f"No tree-sitter source found in {tree_sitter_path}")
 
     if not tree_sitter_so.exists() or debug_mode:
         if multiprocessing.current_process().name != "MainProcess":

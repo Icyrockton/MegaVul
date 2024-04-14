@@ -1,5 +1,4 @@
 import difflib
-import json
 import logging
 from enum import StrEnum
 from pathlib import Path
@@ -45,9 +44,10 @@ def traverse_single_commit(commit: DownloadedCommitInfo) -> Iterator[Tuple[str, 
 
 
 class RepoType(StrEnum):
-    PureC = 'c'
-    PureCpp = 'cpp'
-    Mix = 'mix'
+    PureC = 'c' # All the files in this project are C
+    PureCpp = 'cpp' # All the files in this project are CPP
+    Mix = 'mix' # CPP and C mix
+    Java = 'java'
     # extend other languages
 
 def difflib_diff_func(before:str, after:str) -> tuple[str,dict]:
@@ -107,7 +107,7 @@ class ExtractCommitDiffRecorder:
 
     def print_raw_info(self, logger: logging.Logger):
         logger.info(
-            f'[CommitDiff Recorder] raw info before parse, CVE:{self.__raw_cve_cnt} Commits:{self.__raw_commit_cnt} Files:{self.__raw_file_cnt} Functions:{self.__raw_func_cnt}')
+            f'[CommitDiff Recorder] Raw info before parse, CVE:{self.__raw_cve_cnt} Commits:{self.__raw_commit_cnt} Files:{self.__raw_file_cnt} Functions:{self.__raw_func_cnt}')
 
     def record_diff_info(self, cve_with_parsed_commit: list[CveWithCommitInfo]):
         self.__diff_cve_cnt = len(cve_with_parsed_commit)
@@ -121,7 +121,7 @@ class ExtractCommitDiffRecorder:
 
     def print_diff_info(self, logger: logging.Logger):
         logger.info(
-            f'[CommitDiff Recorder] after finding commits that parsed successfully, CVE:{self.__diff_cve_cnt} Commits:{self.__diff_commit_cnt} Files:{self.__diff_file_cnt} Vul-Functions:{self.__diff_vul_func_cnt} Non-Vul-Functions:{self.__diff_no_vul_func_cnt}')
+            f'[CommitDiff Recorder] After finding commits that parsed successfully, CVE:{self.__diff_cve_cnt} Commits:{self.__diff_commit_cnt} Files:{self.__diff_file_cnt} Vul-Functions:{self.__diff_vul_func_cnt} Non-Vul-Functions:{self.__diff_no_vul_func_cnt}')
 
     def record_and_print_diff_info(self,logger: logging.Logger,cve_with_parsed_commit: list[CveWithCommitInfo]):
         self.record_diff_info(cve_with_parsed_commit)

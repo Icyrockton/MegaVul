@@ -1,5 +1,7 @@
 import json
 import math
+import shutil
+
 from tqdm import tqdm
 from dataclasses import dataclass
 
@@ -10,7 +12,7 @@ from megavul.util.storage import StorageLocation
 
 RESULT_PER_PAGE = 1000
 def compose_nvd_page_url(page_index: int, results_per_page: int = RESULT_PER_PAGE):
-    return f'https://services.nvd.nist.gov/rest/json/cves/2.0/?resultsPerPage={results_per_page}&startIndex={page_index * RESULT_PER_PAGE}'
+    return f'https://services.nvd.nist.gov/rest/json/cves/2.0/?resultsPerPage={results_per_page}&startIndex={page_index * results_per_page}'
 
 @dataclass
 class NvdMetaData:
@@ -45,9 +47,11 @@ def crawl_nvd(use_cache:bool = True):
             return
         elif old_result_entries_cnt != nvd_metadata.totalResults:
             global_logger.info(f'Out-of-date data, old:{old_result_entries_cnt} now:{nvd_metadata.totalResults}, try to download the latest NVD database')
+            # remove old cache
+            shutil.rmtree(cache_page_dir)
+            cache_page_dir.mkdir(exist_ok=True)
         else:
             global_logger.info(f'Try to download the latest NVD database, ignoring the cache')
-
 
     # begin download latest CVE entries from NVD databases
     for page in tqdm(range(total_page_cnt),desc='Downloading CVE page from NVD',):
@@ -73,7 +77,7 @@ def crawl_nvd(use_cache:bool = True):
         save_data_as_json(cve_entries, cache_page_path)
 
     global_logger.info(f'Download NVD database complete! total entries:{len(all_cve_entries)}')
-    save_data_as_json(all_cve_entries,result_save_path)
+    save_data_as_json(all_cve_entries,result_save_path, overwrite= True)
 
 if __name__ == '__main__':
     crawl_nvd()

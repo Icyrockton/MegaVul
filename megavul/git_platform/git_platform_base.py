@@ -1,7 +1,7 @@
 import logging
 from abc import ABCMeta, abstractmethod
 from typing import Optional
-from megavul.git_platform.common import CommitInfo, DownloadedCommitInfo, cache_commit_file_dir, filter_accepted_files, \
+from megavul.git_platform.common import DownloadedCommitInfo, cache_commit_file_dir, filter_accepted_files, \
     RawCommitInfo
 from pathlib import Path
 
@@ -81,5 +81,5 @@ class FallBackPlatformBase(GitPlatformBase):
         pass
 
     def can_handle_this_url(self, logger: logging.Logger, url: str, url_netloc: str) -> bool:
-        logger.info(self.fmt_msg(f'no GitPlatform can handle: {url}'))
+        logger.info(self.fmt_msg(f'No GitPlatform can handle: {url}'))
         return True

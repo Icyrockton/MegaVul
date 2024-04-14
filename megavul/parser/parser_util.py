@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 from typing import Iterator
-from tree_sitter import Language, Parser, TreeCursor, Tree, Node
+from tree_sitter import TreeCursor, Tree, Node
 
 @dataclass
 class ExtractedFunction:

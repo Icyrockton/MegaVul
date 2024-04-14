@@ -7,11 +7,11 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 1
       - name: Set up JDK
-        uses: actions/setup-java@v3
+        uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
           java-version: '19'
@@ -20,37 +20,43 @@ jobs:
         with:
           ruby-version: 2.7
       - name: Set up Go
-        uses: actions/setup-go@v2
+        uses: actions/setup-go@v5
         with:
+          cache: false
           go-version: 1.18
+      - name: Set up Swift
+        if: matrix.os == 'windows-latest'
+        uses: SwiftyLab/setup-swift@latest
+        with:
+          swift-version: "5.9"
       - name: Install Bundler
-        run: gem install bundler
+        run: gem install bundler -v 2.4.22
       - name: Delete `.rustup` directory
         run: rm -rf /home/runner/.rustup # to save disk space
         if: runner.os == 'Linux'
       - name: Delete `.cargo` directory # to save disk space
         run: rm -rf /home/runner/.cargo
         if: runner.os == 'Linux'
-      - uses: actions/cache@v3
+      - uses: actions/cache@v4
         with:
           path: |
             ~/.sbt
             ~/.coursier
           key: ${{ runner.os }}-sbt-${{ hashfiles('**/build.sbt') }}
       - name: Compile and run tests
-        run: sbt clean +test
+        run: sbt clean test
   formatting:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 1
       - name: Set up JDK
-        uses: actions/setup-java@v3
+        uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
           java-version: '19'
-      - uses: actions/cache@v3
+      - uses: actions/cache@v4
         with:
           path: |
             ~/.sbt
@@ -60,18 +66,21 @@ jobs:
         run: sbt scalafmtCheck Test/scalafmtCheck
       - run: echo "Previous step failed because code is not formatted. Run 'sbt scalafmt Test/scalafmt'"
         if: ${{ failure() }}
+      - name: Validate CITATION.cff
+        uses: dieghernan/cff-validator@v3
+
   test-scripts:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 1
       - name: Set up JDK
-        uses: actions/setup-java@v3
+        uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
           java-version: '19'
-      - uses: actions/cache@v3
+      - uses: actions/cache@v4
         with:
           path: |
             ~/.sbt
@@ -84,6 +93,7 @@ jobs:
           ./joern --src /tmp/foo --run scan
           ./joern-scan /tmp/foo
           ./joern-scan --dump
+          ./joern-slice data-flow -o target/slice
       - run: |
           cd joern-cli/target/universal/stage
           ./schema-extender/test.sh

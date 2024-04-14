@@ -1,19 +1,13 @@
 from pathlib import Path
 from typing import Callable
 
-def check_path_exist_or_create(path: Path):
-    if not path.exists():
-        path.mkdir(parents=True, exist_ok=True)
-
-
 def path_exists_checker(func: Callable[..., Path]) -> Callable[..., Path]:
     def wrapper_func(*args, **kwargs) -> Path:
-        return_val = func(*args, **kwargs)
-        check_path_exist_or_create(return_val)
-        return return_val
-
+        path = func(*args, **kwargs)
+        if not path.exists():
+            path.mkdir(parents=True, exist_ok=True)
+        return path
     return wrapper_func
-
 
 class StorageLocation:
 
@@ -30,6 +24,11 @@ class StorageLocation:
     @path_exists_checker
     def result_dir() -> Path:
         return StorageLocation.storage_dir() / 'result'
+
+    @staticmethod
+    @path_exists_checker
+    def pl_result_dir(crawling_language:str) -> Path:
+        return StorageLocation.result_dir() / crawling_language
 
     @staticmethod
     @path_exists_checker
@@ -63,8 +62,8 @@ class StorageLocation:
         return StorageLocation.base_dir() / 'joern'
 
     @staticmethod
-    def joern_script_path():
-        return StorageLocation.base_dir() / 'MegaVulGraphGenerateTest.scala'
+    def scala_script_dir() -> Path:
+        return StorageLocation.base_dir() / 'scala'
 
     @staticmethod
     def config_path():

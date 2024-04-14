@@ -4,7 +4,7 @@ from typing import Optional
 from urllib.parse import urlparse
 
 from megavul.git_platform.git_platform_base import GitPlatformBase
-from megavul.git_platform.common import CommitInfo, DownloadedCommitInfo, trunc_commit_file_name, RawCommitInfo
+from megavul.git_platform.common import trunc_commit_file_name, RawCommitInfo
 from megavul.util.logging_util import global_logger
 from megavul.util.utils import get_bs4_parsed_html, save_str, get_request_in_text, check_file_exists_and_not_empty, get_unix_time_from_git_date_cgit
 
@@ -67,7 +67,7 @@ class CGitPlatformBase(GitPlatformBase):
             file = head.a.text
             file_paths.append(file)
 
-        repo_name = cgit_page.find('td', class_='main').find('a', {'title': True}).text
+        repo_name = cgit_page.find('td', class_='main').find_all('a')[1].text
         repo_name = repo_name.split('.')[0]
 
         return RawCommitInfo(

@@ -2,4 +2,6 @@
 megavul/storage/cache
 megavul/storage/logging
 megavul/storage/result
+megavul/pipeline/target
+**/__pycache__/
 megavul/github_token.txt

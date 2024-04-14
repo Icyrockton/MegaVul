@@ -5,7 +5,6 @@
 project/project
 project/target
 target
-.idea/
 tests/smoke-test-repos
 tests/**/node_modules
 tests/**/package-lock.json
@@ -19,9 +18,7 @@ cfg-for-funcs.json
 pdg-for-funcs.json
 joern-cli/workspace
 /workspace
-.bloop
 null
-/.bsp
 /gnupg-*
 /joern-cli/${sys:LOG_DIR}/
 .local
@@ -29,17 +26,28 @@ null
 **/astgen-macos
 **/astgen-macos-arm
 **/astgen-linux
+**/SwiftAstGen-win.exe
+**/SwiftAstGen-mac
+**/SwiftAstGen-linux
 **/php2cpg/bin
+**/c2cpg/lib
 /foo.c
 /woo.c
 /cpg_*.bin.zip
-.DS_Store
 **/goastgen-windows.exe
 **/goastgen-linux
 **/goastgen-linux-arm64
 **/goastgen-macos
 **/goastgen-macos-arm64
+**/dotnetastgen-linux
+**/dotnetastgen-linux-arm
+**/dotnetastgen-win.exe
+**/dotnetastgen-win-arm.exe
+**/dotnetastgen-macos
+**/dotnetastgen-macos-arm
 slices.json
+**/.antlr
+/joern-cli/frontends/csharpsrc2cpg/bin
 
 ##############
 # Nix flakes #
@@ -48,3 +56,21 @@ slices.json
 flake.nix
 flake.lock
 .direnv
+
+##############
+# Metals LSP #
+##############
+**/.metals
+**/metals.sbt
+*.semanticdb
+.vscode/settings.json
+
+##############
+# IDE/OS     #
+##############
+
+.vscode
+.idea/
+.bloop
+**/.DS_Store
+**/.bsp

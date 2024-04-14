@@ -5,8 +5,9 @@ import subprocess
 import signal
 from time import sleep
 from megavul.parser.clike_code_abstracter import CLikeCodeAbstracter
+from megavul.parser.java_code_abstracter import JavaCodeAbstracter
 from megavul.pipeline.json_save_location import cve_with_parsed_and_filtered_commit_json_path, \
-    cve_with_graph_abstract_commit_json_path
+    cve_with_graph_abstract_commit_json_path, megavul_graph_zip_path
 from megavul.util.logging_util import global_logger
 from megavul.util.storage import StorageLocation
 from megavul.git_platform.common import VulnerableFunction, NonVulnerableFunction, CveWithCommitInfo
@@ -15,9 +16,10 @@ from megavul.util.utils import load_from_marshmallow_dataclass_json_file, save_s
 import shutil
 from pathlib import Path
 from megavul.util.concurrent_util import multiprocessing_apply_data_with_logger, multiprocessing_map
+from megavul.util.config import crawling_language, CrawlingType
 
-generate_source_dir = StorageLocation.cache_dir() / "joern_file_cache"
-graph_save_dir = StorageLocation.result_dir() / "graph"
+generate_source_dir = StorageLocation.cache_dir() / crawling_language / "joern_file_cache"
+graph_save_dir = StorageLocation.result_dir() / crawling_language / "graph"
 
 def generate_source_file(cve_with_commit: list[CveWithCommitInfo], using_cache: bool = False):
     save_dir = generate_source_dir
@@ -64,22 +66,29 @@ def run_joern_once(timeout) -> int:
     """
     working_dir = StorageLocation.joern_dir()
     proxy_str = ''
+    if crawling_language == CrawlingType.C_CPP:
+        generate_test = 'io.joern.c2cpg.io.MegaVulGraphGenerateForCAndCppTest'
+    elif crawling_language == CrawlingType.Java:
+        generate_test = 'io.joern.javasrc2cpg.querying.MegaVulGraphGenerateForJavaTest'
+    else:
+        raise RuntimeError("Unknown test")
+
     if proxies is not None:
         proxy_str = convert_to_jvm_proxy(proxies)
-        global_logger.info(f'running joern with proxy : {proxy_str}')
+        global_logger.info(f'Running joern with proxy : {proxy_str}')
     try:
         my_env = os.environ.copy()
         my_env['MegaVulInputDir'] = str(generate_source_dir)
         p = subprocess.Popen(
-            f'sbt {proxy_str} "testOnly io.joern.c2cpg.io.MegaVulGraphGenerateTest -- -t "generateGraph""',
+            f'sbt {proxy_str} "testOnly {generate_test} -- -t "generateGraph""',
             shell=True, start_new_session=True, cwd=working_dir, env=my_env, stderr=subprocess.STDOUT)
         return_code = p.wait(timeout=timeout)
         if return_code != 0:
-            global_logger.error('running joern failed. please see the error message')
+            global_logger.error('Running joern failed. please see the error message')
             return -1
         return 1
     except subprocess.TimeoutExpired:
-        global_logger.info(f'joern run time out, terminating the process group...')
+        global_logger.info(f'Joern run time out, terminating the process group...')
         os.killpg(os.getpgid(p.pid), signal.SIGKILL)
         sleep(5)
         return 0
@@ -88,12 +97,12 @@ def run_joern_build():
     """
         run the following code pre-build the joern and download scala dependencies.
     """
-    global_logger.info('joern begin download dependencies and build')
+    global_logger.info('Joern begin download dependencies and build')
     my_env = os.environ.copy()
     return_code = subprocess.check_call(f'sbt exit', shell=True, text=True, env=my_env, stderr=subprocess.STDOUT)
     if return_code != 0:
-        raise RuntimeError("joern build failed. please see the error message")
-    global_logger.info('joern build finished')
+        raise RuntimeError("Joern build failed. please see the error message")
+    global_logger.info('Joern build finished')
 
 
 def run_joern():
@@ -116,30 +125,44 @@ def check_json_complete(path:Path):
     try:
         read_json_from_local(path)
     except json.decoder.JSONDecodeError:
-        global_logger.info(f'json {path} is corrupted, remove this file')
+        global_logger.info(f'Json {path} is corrupted, remove this file')
         os.remove(path)
 
 def call_joern_to_generate_graph():
     joern_path = StorageLocation.joern_dir()
-    joern_script_path = StorageLocation.joern_script_path()
+
+    if crawling_language == CrawlingType.C_CPP:
+        joern_script_path = StorageLocation.scala_script_dir() / 'MegaVulGraphGenerateForCAndCppTest.scala'
+    elif crawling_language == CrawlingType.Java:
+        joern_script_path = StorageLocation.scala_script_dir() / 'MegaVulGraphGenerateForJavaTest.scala'
+    else:
+        raise RuntimeError(f"Scala file not found for {crawling_language}")
+
     joern_script_name = joern_script_path.name
 
     if not joern_path.exists():
-        global_logger.error(f'missing joern source code in {joern_path}, please git clone joern first.')
+        global_logger.error(f'Missing joern source code in {joern_path}, please git clone joern first.')
         return
     if not joern_script_path.exists():
-        global_logger.error(f'missing generate graph script file in {joern_script_path}.')
+        global_logger.error(f'Missing generate graph script file in {joern_script_path}.')
         return
 
     # copy Test script, we will run this TestFile later
-    shutil.copy(joern_script_path,
-                joern_path / "joern-cli/frontends/c2cpg/src/test/scala/io/joern/c2cpg/io" / joern_script_name)
+    if crawling_language == CrawlingType.C_CPP:
+        shutil.copy(joern_script_path,
+                    joern_path / "joern-cli/frontends/c2cpg/src/test/scala/io/joern/c2cpg/io" / joern_script_name)
+    elif crawling_language == CrawlingType.Java:
+        shutil.copy(joern_script_path,
+                    joern_path / "joern-cli/frontends/javasrc2cpg/src/test/scala/io/joern/javasrc2cpg/querying" / joern_script_name)
+    else:
+        raise RuntimeError(f"Unspecified {joern_script_path} file copy destination")
+
 
     run_joern_build()
     run_joern()
 
     # shutdown is not graceful, some json corrupted, check json is complete
-    global_logger.info(f'checking all joern generated json files')
+    global_logger.info(f'Checking all joern generated json files')
     multiprocessing_map(check_json_complete,generate_source_dir.rglob("*.json"))
 
     # run joern again
@@ -215,7 +238,7 @@ def check_func_graph_complete(logger: logging.Logger, graph_path: Path, ) -> boo
             parse_error_methods.append(m)
 
     if len(parse_error_methods) > 0:
-        logger.debug(f'find function graph error in {graph_path}')
+        logger.debug(f'Find function graph error in {graph_path}')
         return False
 
     return True
@@ -275,7 +298,13 @@ def find_successfully_extracted_func_graph(logger: logging.Logger, cve: CveWithC
 
 
 def abstracting_functions(logger: logging.Logger, cve: CveWithCommitInfo):
-    code_abstracter = CLikeCodeAbstracter(logger)
+    if crawling_language == CrawlingType.C_CPP:
+        code_abstracter = CLikeCodeAbstracter(logger)
+    elif crawling_language == CrawlingType.Java:
+        code_abstracter = JavaCodeAbstracter(logger)
+    else:
+        raise RuntimeError(f"Code abstracter for {crawling_language} not found!")
+
     for commit in cve.commits:
         for file in commit.files:
             language = file.language
@@ -318,7 +347,7 @@ def info_recorder(cve_list: list[CveWithCommitInfo]):
                        f"non_vulnerable:{parse_succeed_non_vul}/{total_non_vul}[{parse_succeed_non_vul / total_non_vul * 100.0:.2f}%]")
 
 
-def extract_graph_and_abstract():
+def  extract_graph_and_abstract():
     """
         using `Joern` to extract graph
         populate generated file path into the graph path field of VulnerableFunction | NonVulnerableFunction
@@ -350,8 +379,8 @@ def extract_graph_and_abstract():
     save_marshmallow_dataclass_to_json_file(CveWithCommitInfo, cve_with_graph_abstract_commit_json_path,
                                             cve_with_graph_abstract_commit)
 
-    global_logger.info('compressing graph directory into zip file......')
-    compress_directory_to_zip(graph_save_dir, StorageLocation.result_dir() / "megavul_graph.zip")
+    global_logger.info('Compressing graph directory into zip file......')
+    compress_directory_to_zip(graph_save_dir, megavul_graph_zip_path)
 
 
 if __name__ == '__main__':

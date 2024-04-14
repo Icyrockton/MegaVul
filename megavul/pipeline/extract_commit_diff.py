@@ -5,7 +5,7 @@ from megavul.git_platform.common import DownloadedCommitInfo, CveWithDownloadedC
     trunc_commit_file_name, \
     CppFileExtension, CFileExtension, HeaderExtension, VulnerableFunction, NonVulnerableFunction, CommitFile, \
     CommitInfo, CveWithCommitInfo
-from megavul.parser.parser_base import ParserBase
+from megavul.parser.parser_java import ParserJava
 from megavul.parser.parser_util import ExtractedFunction
 from megavul.pipeline.extract_commit_diff_filter import run_filters, TestFunctionFilter, TestFileFilter, MultiCveCommitFilter, \
     DebugGlobalFilter, OneCveMultipleCommitsNonVulDuplicateFilter, OneCveMultipleCommitsByContentDuplicateFilter, \
@@ -24,9 +24,10 @@ from megavul.util.storage import StorageLocation
 from functools import partial
 from megavul.parser.parser_c import ParserC
 from megavul.parser.parser_cpp import ParserCpp
+from megavul.util.config import crawling_language, CrawlingType
 
-parsed_commit_cache_dir = StorageLocation.cache_dir() / "commit_file_parsed_cache"
-commit_file_cache_dir = StorageLocation.cache_dir() / "commit_file_cache"
+parsed_commit_cache_dir = StorageLocation.cache_dir() / crawling_language / "commit_file_parsed_cache"
+commit_file_cache_dir = StorageLocation.cache_dir() / crawling_language / "commit_file_cache"
 
 def repo_name_merge(repo_name:str) -> str:
     repo_name = try_repo_name_merge(repo_name)
@@ -46,28 +47,33 @@ def determine_all_repo_types(cve_with_commit: list[CveWithDownloadedCommitInfo])
     repo_type_mapping: dict[str, RepoType] = {}
 
     for commit in traverse_all_commit(cve_with_commit):
-        has_cpp_file, has_c_file = False, False
         repo_name = repo_name_merge(commit.repo_name)
+        if crawling_language == CrawlingType.C_CPP:
+            has_cpp_file, has_c_file = False, False
+            for f_path in commit.diff_file_paths:
+                f_ext = f_path.split('.')[-1].lower()
+                if f_ext in ['c']:
+                    has_c_file = True
+                elif f_ext in ['cpp', 'cc', 'hh', 'hxx', 'cxx', 'hpp']:
+                    has_cpp_file = True
 
-        for f_path in commit.diff_file_paths:
-            f_ext = f_path.split('.')[-1].lower()
-            if f_ext in ['c']:
-                has_c_file = True
-            elif f_ext in ['cpp', 'cc', 'hh', 'hxx', 'cxx', 'hpp']:
-                has_cpp_file = True
+            repo_type = 'mix'
+            if has_cpp_file and not has_c_file:
+                repo_type = 'cpp'
+            elif not has_cpp_file and has_c_file:
+                repo_type = 'c'
 
-        repo_type = 'mix'
-        if has_cpp_file and not has_c_file:
-            repo_type = 'cpp'
-        elif not has_cpp_file and has_c_file:
-            repo_type = 'c'
-
-        if repo_name in repo_type_mapping:
-            prev_repo_type = repo_type_mapping[repo_name]
-            if prev_repo_type != repo_type:
-                repo_type_mapping[repo_name] = RepoType.Mix
+            if repo_name in repo_type_mapping:
+                prev_repo_type = repo_type_mapping[repo_name]
+                if prev_repo_type != repo_type:
+                    repo_type_mapping[repo_name] = RepoType.Mix
+            else:
+                repo_type_mapping[repo_name] = RepoType(repo_type)
+        elif crawling_language == CrawlingType.Java:
+            # for java projects, all files are java
+            repo_type_mapping[repo_name] = RepoType.Java
         else:
-            repo_type_mapping[repo_name] = RepoType(repo_type)
+            raise RuntimeError(f'{crawling_language} is not supported')
 
     return repo_type_mapping
 
@@ -75,29 +81,34 @@ def determine_all_repo_types(cve_with_commit: list[CveWithDownloadedCommitInfo])
 def get_file_type(repo_type: RepoType, f_name: str, fp: Path) -> str:
     f_ext = f_name.split('.')[-1]
 
-    if (f_ext in CFileExtension) or (f_ext in HeaderExtension and repo_type == RepoType.PureC):
-        return 'c'
-    elif (f_ext in CppFileExtension) or (f_ext in HeaderExtension and repo_type == RepoType.PureCpp):
-        return 'cpp'
-    elif f_ext in HeaderExtension:
-        # mix c and cpp, using linguist to detect language
-        detect_language = get_file_type_using_linguist(fp)
-        if detect_language == 'c':
+    if crawling_language == CrawlingType.C_CPP:
+        if (f_ext in CFileExtension) or (f_ext in HeaderExtension and repo_type == RepoType.PureC):
             return 'c'
-        elif detect_language == 'c++':  # cpp
+        elif (f_ext in CppFileExtension) or (f_ext in HeaderExtension and repo_type == RepoType.PureCpp):
             return 'cpp'
+        elif f_ext in HeaderExtension:
+            # mix c and cpp, using linguist to detect language
+            detect_language = get_file_type_using_linguist(fp)
+            if detect_language == 'c':
+                return 'c'
+            elif detect_language == 'c++':  # cpp
+                return 'cpp'
 
-        # object-c header files also have the .h suffix.
-        return detect_language # 'objective-c'
+            # object-c header files also have the .h suffix.
+            return detect_language  # 'objective-c'
+    elif crawling_language == CrawlingType.Java:
+        return 'java'
 
-    raise RuntimeError(f"unknown file type for {fp}")
+    raise RuntimeError(f"Unknown file type for {fp}")
 
 def parse_all_commit_files(logger: logging.Logger, cve_with_commit: list[CveWithDownloadedCommitInfo],
                            all_repo_type_mapping: dict[str, RepoType]) -> None:
-    parser_list : list[ParserBase] = [
-        ParserC(logger),
-        ParserCpp(logger)
-    ]
+    if crawling_language == CrawlingType.C_CPP:
+        parser_list = [ParserC(global_logger), ParserCpp(global_logger) ]
+    elif crawling_language == CrawlingType.Java:
+        parser_list = [ParserJava(global_logger)]
+    else:
+        raise RuntimeError(f"Parser for {crawling_language} is not found!")
 
     for commit in traverse_all_commit(cve_with_commit):
         repo_type = all_repo_type_mapping[repo_name_merge(commit.repo_name)]
@@ -113,8 +124,7 @@ def parse_all_commit_files(logger: logging.Logger, cve_with_commit: list[CveWith
             parsed_file_save_dst = parsed_commit_cache_dir / new_repo_name / base_hash / hash / f_name
             parsed_file_save_dst.parent.mkdir(exist_ok=True, parents=True)
 
-            file_type = get_file_type(repo_type,f_name,raw_file)
-
+            file_type : str = get_file_type(repo_type,f_name,raw_file)
             # run parser to parse file and extract functions
             for parser in parser_list:
                 if parser.can_handle_this_language(file_type):
@@ -211,6 +221,7 @@ def find_successfully_parsed_commit(logger: logging.Logger, cve_with_commit: lis
                     parent_func = parent_file_func_name_mapping[func_name]
 
                     if this_func.func == parent_func.func:
+                        # function keep unchanged, non-vulnerable
                         non_vulnerable_funcs.append(
                             NonVulnerableFunction(
                                 func_name, this_func.parameter_list_signature, this_func.parameter_list, this_func.return_type, this_func.func, '',
@@ -251,12 +262,14 @@ def find_successfully_parsed_commit(logger: logging.Logger, cve_with_commit: lis
     return result_cve
 
 def build_parser():
-    parser_list = [
-        ParserC(global_logger),
-        ParserCpp(global_logger),
-    ]
+    if crawling_language == CrawlingType.C_CPP:
+        parser_list = [ParserC(global_logger), ParserCpp(global_logger)]
+    elif crawling_language == CrawlingType.Java:
+        parser_list = [ParserJava(global_logger)]
+    else:
+        raise RuntimeError(f'Parser not found for {crawling_language}')
     for parser in parser_list:
-        global_logger.info(f"building {parser.parser_name}")
+        global_logger.info(f"Building {parser.parser_name} parser")
 
 def extract_successful_parsed_commit(using_cache:bool = False) -> list[CveWithCommitInfo]:
     if cve_with_parsed_commit_json_path.exists() and using_cache:
@@ -266,7 +279,7 @@ def extract_successful_parsed_commit(using_cache:bool = False) -> list[CveWithCo
     recorder = ExtractCommitDiffRecorder(parsed_commit_cache_dir)
 
     if not cve_with_downloaded_commit_json_path.exists():
-        global_logger.info(f'{cve_with_downloaded_commit_json_path} not found, run extract_and_download_commit.py to download commits first.')
+        raise RuntimeError(f'{cve_with_downloaded_commit_json_path} not found, run extract_and_download_commit.py to download commits first')
 
     cve_with_commit: list[CveWithDownloadedCommitInfo] = load_from_marshmallow_dataclass_json_file(
         CveWithDownloadedCommitInfo, cve_with_downloaded_commit_json_path , is_list=True)
@@ -280,7 +293,7 @@ def extract_successful_parsed_commit(using_cache:bool = False) -> list[CveWithCo
         partial(parse_all_commit_files, all_repo_type_mapping = all_repo_type_mapping) ,
         cve_with_commit , chunk_mode= True
     )
-    global_logger.info('all commit files have benn parsed')
+    global_logger.info('All commit files have benn parsed!')
     recorder.record_and_print_raw_info(global_logger,cve_with_commit)
 
     # step.3 finding commits that successfully parsed, extract vulnerable and non-vulnerable functions
@@ -298,9 +311,9 @@ def extract_successful_parsed_commit(using_cache:bool = False) -> list[CveWithCo
 
 def run_filters_with_parsed_commit(cve_with_parsed_commit: list[CveWithCommitInfo]):
     """
-        run filters to clean the dataset, and get high quality data.
+        run filters to clean the dataset, get high quality data.
     """
-    global_logger.info('running filters to distill the dataset')
+    global_logger.info('Running filters to distill the dataset')
     filter_result = run_filters(cve_with_parsed_commit, [
         TestFileFilter(global_logger),
         LargeChangeFilter(global_logger),
@@ -314,7 +327,7 @@ def run_filters_with_parsed_commit(cve_with_parsed_commit: list[CveWithCommitInf
         LargeVulFunctionFilter(global_logger),
     ])
 
-    global_logger.info(f'all filters have been run, save result to {cve_with_parsed_and_filtered_commit_json_path}')
+    global_logger.info(f'All filters have been run, save result to {cve_with_parsed_and_filtered_commit_json_path}')
     save_marshmallow_dataclass_to_json_file(
         CveWithCommitInfo, cve_with_parsed_and_filtered_commit_json_path , filter_result
     )

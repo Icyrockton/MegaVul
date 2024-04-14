@@ -2,7 +2,6 @@ import base64
 import logging
 import random
 import time
-from itertools import takewhile
 from pathlib import Path
 from typing import Optional
 import github
@@ -10,7 +9,7 @@ import urllib3.exceptions
 from github.Repository import Repository
 from urllib.parse import urlparse
 import re
-from github import Github, Auth, GithubException
+from github import Github, GithubException
 from github.Commit import Commit
 from github.PaginatedList import PaginatedList
 import json
@@ -23,8 +22,8 @@ from github.GithubException import BadCredentialsException
 from megavul.util.utils import check_file_exists_and_not_empty
 from megavul.util.config import config_file
 from megavul.util.logging_util import global_logger
-from megavul.git_platform.common import CommitInfo, try_repo_name_merge, DownloadedCommitInfo, trunc_commit_file_name, \
-    try_decode_binary_data_and_write_to_file, cache_commit_file_dir, RawCommitInfo
+from megavul.git_platform.common import trunc_commit_file_name, \
+    try_decode_binary_data_and_write_to_file, RawCommitInfo
 
 GITHUB_TOKENS = config_file['github']
 GITHUB_LIST = []
@@ -45,7 +44,7 @@ GITHUB_LIST = []
 def add_github_token_and_check():
     global GITHUB_LIST,GITHUB_TOKENS
     for token in GITHUB_TOKENS:
-        global_logger.info(f'adding GitHub Token {token}')
+        global_logger.info(f'Adding GitHub token {token}')
         GITHUB_LIST.append(Github(token,
                                   retry=Retry(total=None, backoff_factor= 0.1,
                                               status_forcelist=[403],)))  # 403 rate limit exceeded
@@ -212,7 +211,7 @@ def find_github_commits_from_pull(logger: logging.Logger, repo_name: str, pull_i
             commit_urls.append(c.html_url)
         return commit_urls
     except GithubException as e:
-        if e.status == 404:
+        if e.status == 404 or e.status == 502:
             return commit_urls
         logger.error(f'[Github Exception] Get pull info({repo_name}/{pull_id}) with unknown GithubException:{e}')
         raise e
@@ -225,12 +224,9 @@ def find_github_commits_from_issue(logger: logging.Logger, repo_name: str, issue
     commit_urls = []
     pull_ids, issue_commit_urls = find_github_pull_and_commit_from_issue(logger, repo_name, issue_id)
     commit_urls.extend(issue_commit_urls)
-    # print('Pull Ids: ',pull_ids)
-    # print('Issue commit URLs: ',issue_commit_urls)
     for pull_id in pull_ids:
         commit_urls.extend(find_github_commits_from_pull(logger, repo_name, pull_id))
 
-    # print('Commit URLs: ',commit_urls)
     return commit_urls
 
 

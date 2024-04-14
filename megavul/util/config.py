@@ -1,7 +1,14 @@
+from enum import StrEnum
 from megavul.util.storage import StorageLocation
 import yaml
 
-__all__ = ['config_file']
+__all__ = ['config_file','crawling_language','CrawlingType']
+
+SUPPORT_CRAWLING_LANGUAGE =  ['c_cpp' , 'java']
+class CrawlingType(StrEnum):
+    C_CPP = 'c_cpp'
+    Java = 'java'
+
 def read_config_file() -> dict:
     config_path = StorageLocation.config_path()
     github_token_path = StorageLocation.github_token_path()
@@ -18,11 +25,20 @@ def read_config_file() -> dict:
         else:
             raise Exception(f'Invalid github token {token}, must start with "ghp" or "gho"')
 
-    if len(github_tokens) < 4:
-        raise Exception('At least 4 github tokens are required')
+    if len(github_tokens) < 6:
+        raise Exception('At least 6 github tokens are required')
 
     config = yaml.safe_load(config_path.open(mode='r'))
     config['github'] = github_tokens
+
+    if 'crawling_language' not in config:
+        raise RuntimeError(
+            f"No programming language is specified for crawling, currently MegaVul support: {SUPPORT_CRAWLING_LANGUAGE}")
+    elif config['crawling_language'] not in SUPPORT_CRAWLING_LANGUAGE:
+        raise RuntimeError(
+            f"Currently MegaVul only supports crawling the following programming languages: {SUPPORT_CRAWLING_LANGUAGE}")
+
     return config
 
 config_file = read_config_file()
+crawling_language = CrawlingType(config_file['crawling_language'])

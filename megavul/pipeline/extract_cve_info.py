@@ -19,6 +19,11 @@ from megavul.git_platform.gitlab_pf import find_commits_from_gitlab
 from megavul.git_platform.github_pf import find_potential_commits_from_github
 from megavul.git_platform.common import CvssMetrics, CveWithReferenceUrl
 
+# dumping website flag, result will save into `./storage/dump_website`
+# enabled only when analyzing the source website to be mined
+DUMP_URL_FLAG = False
+DUMP_URL_FREQUENCY = 50
+ALL_CVE_REFERENCE_URL: list[str] = []
 
 def extract_description(descriptions: list) -> str:
     for d in descriptions:
@@ -307,36 +312,28 @@ def mining_commit_urls_from_reference_urls(logger: logging.Logger, urls: list[st
                 commit_url = f'https://github.com/php/php-src/commit/{commit_hash}'
                 url_result.append(commit_url)
         else:
-            logger.debug(f'unknown reference URL: {url}')
+            logger.debug(f'Unknown reference url: {url}')
 
     return url_result
 
-
-# dumping website flag, result will save into `./storage/dump_website`
-# enabled only when analyzing the source website to be mined
-DUMP_URL_FLAG = False
-DUMP_URL_FREQUENCY = 50
-ALL_CVE_REFERENCE_URL: list[str] = []
-
-
 def dump_url():
-    global_logger.info('dumping all cve entries reference URLs, grouped by website...')
+    global_logger.info('Dumping all cve entries reference urls, grouped by website...')
     website_url_dict = {}
-    global_logger.info(f'total reference URLs:{len(ALL_CVE_REFERENCE_URL)}')
+    global_logger.info(f'Total reference urls:{len(ALL_CVE_REFERENCE_URL)}')
 
     for u in ALL_CVE_REFERENCE_URL:
         netloc = urlparse(u).netloc
         website_url_dict.setdefault(netloc, [])
         website_url_dict[netloc].append(u)
 
-    global_logger.info(f'reference URLs from {len(website_url_dict)} different websites')
+    global_logger.info(f'Reference urls from {len(website_url_dict)} different websites')
 
     url_filter_by_frequency = {k: v for k, v in
                                sorted(filter(lambda item: len(item[1]) > DUMP_URL_FREQUENCY, website_url_dict.items()),
                                       key=lambda item: len(item[1]),
                                       reverse=True)}
     global_logger.info(
-        f'{len(url_filter_by_frequency)} websites with URLs appearing more than {DUMP_URL_FREQUENCY} times')
+        f'{len(url_filter_by_frequency)} websites with urls appearing more than {DUMP_URL_FREQUENCY} times')
 
     dumping_dir = StorageLocation.result_dir() / "dump_website"
     dumping_detail_dir = dumping_dir / "detail"
@@ -393,17 +390,17 @@ def parse_single_cve(logger: logging.Logger, cve_row: dict) -> Optional[CveWithR
 def extract_cve_info():
     nvd_cve_entries: list[dict] = read_json_from_local(all_cve_from_nvd_json_path)
 
-    global_logger.info(f'extracting cve info, reference URLs and find potential commit from {len(nvd_cve_entries)} CVE entries')
+    global_logger.info(f'Extracting cve info, reference urls and find potential commits from {len(nvd_cve_entries)} CVE entries')
     cve_with_reference_urls: list[Optional[CveWithReferenceUrl]] = multiprocessing_apply_data_with_logger(parse_single_cve,
                                                                                                           nvd_cve_entries,
                                                                                                           debug=DUMP_URL_FLAG)
-    global_logger.info(f'extracting cve info done!')
+    global_logger.info(f'Extracting cve info done!')
     cve_with_reference_urls: list[CveWithReferenceUrl] = list(
         filter(lambda x: x is not None and len(x.reference_urls) != 0, cve_with_reference_urls))
     global_logger.info(
-        f'filter out cve entries with no reference url [{len(nvd_cve_entries)} -> {len(cve_with_reference_urls)}]')
+        f'Filter out cve entries with no reference url [{len(nvd_cve_entries)} -> {len(cve_with_reference_urls)}]')
 
-    global_logger.info(f'save result to {cve_with_reference_url_json_path}')
+    global_logger.info(f'Save result to {cve_with_reference_url_json_path}')
     save_marshmallow_dataclass_to_json_file(CveWithReferenceUrl, cve_with_reference_url_json_path, cve_with_reference_urls)
 
     if DUMP_URL_FLAG:

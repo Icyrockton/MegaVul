@@ -5,7 +5,8 @@ from typing import Optional
 import chardet
 
 from megavul.util.storage import StorageLocation
-
+from megavul.util.config import crawling_language, CrawlingType
+from megavul.util.logging_util import global_logger
 
 @dataclass
 class DownloadedCommitInfo:
@@ -161,8 +162,22 @@ class CveWithDownloadedCommitInfo:
 HeaderExtension = ['h']  # maybe cpp file or c file
 CFileExtension = ['c']
 CppFileExtension = ['cc', 'cpp', 'cxx', 'hpp', 'hxx', 'hh']
-AcceptedFileExtension = [*HeaderExtension, *CFileExtension, *CppFileExtension]
+JavaFileExtension = ['java']
+AcceptedFileExtension : list[str] = [*HeaderExtension, *CFileExtension, *CppFileExtension]
 
+def select_file_extension():
+    global AcceptedFileExtension
+    if crawling_language == CrawlingType.C_CPP:
+        global_logger.info("Selecting C/C++ file extension filter...")
+        AcceptedFileExtension = [*HeaderExtension, *CFileExtension, *CppFileExtension]
+    elif crawling_language == CrawlingType.Java:
+        global_logger.info("Selecting Java file extension filter...")
+        AcceptedFileExtension = [*JavaFileExtension]
+    else:
+        # extend other programming languages
+        raise RuntimeError(f"The extension of the {crawling_language} language is unknown")
+
+select_file_extension()
 
 def filter_accepted_files(file_paths: list[str]) -> list[str]:
     res = []
@@ -189,7 +204,7 @@ def try_repo_name_merge(repo_name: str) -> str:
 
 def cache_commit_file_dir(repo_name: str, commit_hash: str, current_hash: str) -> Path:
     # avoid commit hash collision
-    root_dir = StorageLocation.cache_dir() / 'commit_file_cache'
+    root_dir = StorageLocation.cache_dir() / crawling_language / 'commit_file_cache'
     dir_path = root_dir / repo_name / commit_hash / current_hash
     return dir_path
 

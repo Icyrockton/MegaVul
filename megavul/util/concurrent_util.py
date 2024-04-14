@@ -23,7 +23,7 @@ def listener_process(queue: multiprocessing.Queue):
     while True:
         message = queue.get()
         if message is None:
-            logger.info('listener_process Done')
+            logger.info('Listener_process Done')
             break  # shutdown the logger process
         logger.handle(message)  # log the message
 
@@ -58,7 +58,7 @@ def multiprocessing_apply_data_with_logger(
         func_with_logger: Callable[[logging.Logger, _T], _S] | Callable[[logging.Logger, List[_R]], List[_S]],
         data: List[_T | _R], chunk_mode=False, debug=False) -> List[_S]:
     if debug:
-        global_logger.debug('running multiprocessing_apply_data_with_logger in DEBUG mode will run in single process')
+        global_logger.debug('Running multiprocessing_apply_data_with_logger in DEBUG mode will run in single process')
         res = []
         if chunk_mode:
             ans = func_with_logger(global_logger,data)
@@ -73,7 +73,7 @@ def multiprocessing_apply_data_with_logger(
     chunk_size = math.ceil(len(data) / max_processors)
     chunks = [data[i: i + chunk_size] for i in range(0, len(data), chunk_size)]
     final_result: List[_S] = []
-    global_logger.info(f'multiprocessing begin process {len(data)}(chuck size {chunk_size}) items in {max_processors} processors')
+    global_logger.info(f'Multiprocessing begin process {len(data)}(chuck size {chunk_size}) items in {max_processors} processors')
 
 
     def save_result(result):

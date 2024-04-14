@@ -4,8 +4,11 @@ from megavul.pipeline.extract_commit_diff import extract_commit_diff
 from megavul.pipeline.extract_cve_info import extract_cve_info
 from megavul.pipeline.extract_graph_and_abstract import extract_graph_and_abstract
 from megavul.pipeline.flatten_megavul import generate_megavul
+from megavul.util.logging_util import global_logger
+from megavul.util.config import crawling_language
 
 if __name__ == '__main__':
+    global_logger.info(f"MegaVul is now crawling {crawling_language}")
 
     # step.1 crawl all CVEs from NVD
     crawl_nvd()

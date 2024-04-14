@@ -156,7 +156,7 @@ dependencies:
     - tornado==6.3.3
     - tqdm==4.66.1
     - traitlets==5.13.0
-    - tree-sitter==0.20.2
+    - tree-sitter==0.21.3
     - typeguard==3.0.2
     - types-python-dateutil==2.8.19.14
     - typing-extensions==4.8.0

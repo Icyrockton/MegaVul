@@ -1,6 +1,6 @@
 import plotly.express as px
 import pandas as pd
-from color import interpolate_in_colors
+from megavul.util.color import interpolate_in_colors
 
 d = {'torvalds/linux': 1673, 'wireshark': 322, 'ImageMagick': 321, 'tensorflow': 287, 'ffmpeg': 286, 'chromium': 285,
      'gpac': 225, 'android': 225, 'php/php-src': 171, 'xen-project/xen': 171, 'binutils-gdb': 152, 'vim': 149,
