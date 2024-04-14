@@ -1,8 +1,8 @@
 package io.joern.jssrc2cpg.passes
 
 import io.joern.jssrc2cpg.testfixtures.DataFlowCodeToCpgSuite
-import io.joern.x2cpg.passes.frontend.ImportsPass._
-import io.shiftleft.semanticcpg.language._
+import io.shiftleft.semanticcpg.language.importresolver.*
+import io.shiftleft.semanticcpg.language.*
 
 class TypeRecoveryPassTests extends DataFlowCodeToCpgSuite {
 
@@ -28,7 +28,7 @@ class TypeRecoveryPassTests extends DataFlowCodeToCpgSuite {
 
     "resolve 'z' types correctly" in {
       // The dictionary/object type is just considered "ANY" which is fine for now
-      cpg.identifier("z").typeFullName.toSet.headOption shouldBe Some("__ecma.Array")
+      cpg.identifier("z").typeFullName.toSet.headOption shouldBe Option("__ecma.Array")
     }
 
     "resolve 'z' identifier call correctly" in {
@@ -57,7 +57,7 @@ class TypeRecoveryPassTests extends DataFlowCodeToCpgSuite {
 
     "resolve correct imports via tag nodes" in {
       val List(a: UnknownMethod, b: UnknownTypeDecl, x: UnknownMethod, y: UnknownTypeDecl) =
-        cpg.call.where(_.referencedImports).tag.toResolvedImport.toList: @unchecked
+        cpg.call.where(_.referencedImports).tag._toEvaluatedImport.toList: @unchecked
       a.fullName shouldBe "slack_sdk:WebClient"
       b.fullName shouldBe "slack_sdk:WebClient"
       x.fullName shouldBe "sendgrid:SendGridAPIClient"
@@ -141,7 +141,7 @@ class TypeRecoveryPassTests extends DataFlowCodeToCpgSuite {
 
     "resolve correct imports via tag nodes" in {
       val List(a: ResolvedMember, b: ResolvedMember, c: ResolvedMember, d: UnknownMethod, e: UnknownTypeDecl) =
-        cpg.call.where(_.referencedImports).tag.toResolvedImport.toList: @unchecked
+        cpg.call.where(_.referencedImports).tag._toEvaluatedImport.toList: @unchecked
       a.basePath shouldBe "Foo.ts::program"
       a.memberName shouldBe "x"
       b.basePath shouldBe "Foo.ts::program"
@@ -186,7 +186,7 @@ class TypeRecoveryPassTests extends DataFlowCodeToCpgSuite {
       val List(d) = cpg.file.name(".*Bar.*").ast.isCall.name("createTable").l
       d.methodFullName shouldBe "flask_sqlalchemy:SQLAlchemy:createTable"
       d.dynamicTypeHintFullName shouldBe Seq()
-      d.callee(NoResolve).isExternal.headOption shouldBe Some(true)
+      d.callee(NoResolve).isExternal.headOption shouldBe Option(true)
     }
 
     "resolve a 'deleteTable' call directly from 'foo.db' field access correctly" in {
@@ -198,7 +198,7 @@ class TypeRecoveryPassTests extends DataFlowCodeToCpgSuite {
         .l
       d.methodFullName shouldBe "flask_sqlalchemy:SQLAlchemy:deleteTable"
       d.dynamicTypeHintFullName shouldBe empty
-      d.callee(NoResolve).isExternal.headOption shouldBe Some(true)
+      d.callee(NoResolve).isExternal.headOption shouldBe Option(true)
     }
 
   }
@@ -229,7 +229,7 @@ class TypeRecoveryPassTests extends DataFlowCodeToCpgSuite {
     )
 
     "resolve correct imports via tag nodes" in {
-      val List(x: ResolvedMethod) = cpg.call.where(_.referencedImports).tag.toResolvedImport.toList: @unchecked
+      val List(x: ResolvedMethod) = cpg.call.where(_.referencedImports).tag._toEvaluatedImport.toList: @unchecked
       x.fullName shouldBe "util.js::program:getIncrementalInteger"
     }
 
@@ -244,9 +244,9 @@ class TypeRecoveryPassTests extends DataFlowCodeToCpgSuite {
     }
 
     "resolve the full name of the currying from the closure" in {
-      val List(x) = cpg.file("util.js").ast.isCall.nameExact("anonymous").lineNumber(4).l
-      x.name shouldBe "anonymous"
-      x.methodFullName shouldBe "util.js::program:anonymous"
+      val List(x) = cpg.file("util.js").ast.isCall.nameExact("<lambda>0").lineNumber(4).l
+      x.name shouldBe "<lambda>0"
+      x.methodFullName shouldBe "util.js::program:<lambda>0"
     }
   }
 
@@ -258,7 +258,7 @@ class TypeRecoveryPassTests extends DataFlowCodeToCpgSuite {
 
     "resolve correct imports via tag nodes" in {
       val List(x: UnknownMethod, y: UnknownTypeDecl) =
-        cpg.call.where(_.referencedImports).tag.toResolvedImport.toList: @unchecked
+        cpg.call.where(_.referencedImports).tag._toEvaluatedImport.toList: @unchecked
       x.fullName shouldBe "googleapis"
       y.fullName shouldBe "googleapis"
     }
@@ -280,7 +280,7 @@ class TypeRecoveryPassTests extends DataFlowCodeToCpgSuite {
 
     "resolve correct imports via tag nodes" in {
       val List(x: UnknownMethod, y: UnknownTypeDecl, z: UnknownMethod) =
-        cpg.call.where(_.referencedImports).tag.toResolvedImport.toList: @unchecked
+        cpg.call.where(_.referencedImports).tag._toEvaluatedImport.toList: @unchecked
       x.fullName shouldBe "googleapis"
       y.fullName shouldBe "googleapis"
       z.fullName shouldBe "googleapis"
@@ -381,7 +381,7 @@ class TypeRecoveryPassTests extends DataFlowCodeToCpgSuite {
 
     "resolve correct imports via tag nodes" in {
       val List(a: ResolvedTypeDecl, b: ResolvedMethod, c: ResolvedMethod, d: UnknownMethod, e: UnknownTypeDecl) =
-        cpg.call.where(_.referencedImports).tag.toResolvedImport.toList: @unchecked
+        cpg.call.where(_.referencedImports).tag._toEvaluatedImport.toList: @unchecked
       a.fullName shouldBe "foo.js::program"
       b.fullName shouldBe "foo.js::program:literalFunction"
       c.fullName shouldBe "foo.js::program:get"
@@ -428,8 +428,8 @@ class TypeRecoveryPassTests extends DataFlowCodeToCpgSuite {
     )
 
     "have their calls from a field access structure successfully recovered" in {
-      cpg.identifier("_tmp_2").typeFullName.headOption shouldBe Some("@angular/common/http:HttpClient")
-      cpg.call("post").methodFullName.headOption shouldBe Some("@angular/common/http:HttpClient:post")
+      cpg.identifier("_tmp_2").typeFullName.headOption shouldBe Option("@angular/common/http:HttpClient")
+      cpg.call("post").methodFullName.headOption shouldBe Option("@angular/common/http:HttpClient:post")
     }
 
   }
@@ -457,8 +457,8 @@ class TypeRecoveryPassTests extends DataFlowCodeToCpgSuite {
 
     "have the type hint recovered and successfully propagated" in {
       val m = cpg.method.fullNameExact("foo.ts::program:SharedService:<init>").head
-      m.parameter.nameExact("http").typeFullName.headOption shouldBe Some("@angular/common/http:HttpClient")
-      cpg.call("post").methodFullName.headOption shouldBe Some("@angular/common/http:HttpClient:post")
+      m.parameter.nameExact("http").typeFullName.headOption shouldBe Option("@angular/common/http:HttpClient")
+      cpg.call("post").methodFullName.headOption shouldBe Option("@angular/common/http:HttpClient:post")
     }
 
   }

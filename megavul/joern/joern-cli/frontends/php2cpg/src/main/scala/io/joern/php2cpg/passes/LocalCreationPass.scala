@@ -21,7 +21,7 @@ import io.joern.x2cpg.AstNodeBuilder
 import io.shiftleft.codepropertygraph.generated.PropertyNames
 
 object LocalCreationPass {
-  def allLocalCreationPasses(cpg: Cpg): Iterator[LocalCreationPass[_ <: AstNode]] =
+  def allLocalCreationPasses(cpg: Cpg): Iterator[LocalCreationPass[? <: AstNode]] =
     Iterator(new NamespaceLocalPass(cpg), new MethodLocalPass(cpg))
 }
 
@@ -32,6 +32,7 @@ abstract class LocalCreationPass[ScopeType <: AstNode](cpg: Cpg)
   override protected def column(node: AstNode)                     = node.columnNumber
   override protected def lineEnd(node: AstNode): Option[Integer]   = None
   override protected def columnEnd(node: AstNode): Option[Integer] = None
+  override protected def code(node: AstNode): String               = node.code
 
   protected def getIdentifiersInScope(node: AstNode): List[Identifier] = {
     node match {

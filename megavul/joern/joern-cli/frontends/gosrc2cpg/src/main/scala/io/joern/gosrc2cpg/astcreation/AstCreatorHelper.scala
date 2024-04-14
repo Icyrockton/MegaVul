@@ -7,7 +7,7 @@ import io.joern.x2cpg.utils.NodeBuilders.newModifierNode
 import io.joern.x2cpg.{Ast, Defines as XDefines}
 import io.shiftleft.codepropertygraph.generated.nodes.{NewModifier, NewNode}
 import io.shiftleft.codepropertygraph.generated.{EvaluationStrategies, ModifierTypes, PropertyNames}
-import org.apache.commons.lang.StringUtils
+import org.apache.commons.lang3.StringUtils
 import ujson.Value
 
 import scala.collection.mutable
@@ -16,17 +16,12 @@ import scala.util.{Failure, Success, Try}
 
 trait AstCreatorHelper { this: AstCreator =>
 
-  // maximum length of code fields in number of characters
-  private val MaxCodeLength: Int = 1000
-  private val MinCodeLength: Int = 50
-
   private val parserNodeCache = mutable.TreeMap[Long, ParserNodeInfo]()
 
   protected def createParserNodeInfo(json: Value): ParserNodeInfo = {
-
     Try(json(ParserKeys.NodeReferenceId).num.toLong) match
       case Failure(_) =>
-        val c     = shortenCode(code(json).toOption.getOrElse(""))
+        val c     = code(json)
         val ln    = line(json)
         val cn    = column(json)
         val lnEnd = lineEndNo(json)
@@ -79,7 +74,7 @@ trait AstCreatorHelper { this: AstCreator =>
     // If the first letter of the node (function, typeDecl, etc) is uppercase, then it is exported.
     // Else, it is un-exported
     // The scope of the node is the package it is defined in.
-    if (name(0).isUpper) {
+    if (name.headOption.exists(_.isUpper)) {
       newModifierNode(ModifierTypes.PUBLIC)
     } else {
       newModifierNode(ModifierTypes.PRIVATE)
@@ -93,8 +88,12 @@ trait AstCreatorHelper { this: AstCreator =>
   }
 
   private def nodeType(node: Value): ParserNode = fromString(node(ParserKeys.NodeType).str, relPathFileName)
-  protected def code(node: Value): Try[String] = Try {
 
+  protected def code(node: Value): String = {
+    codeForValue(node).toOption.fold("")(shortenCode)
+  }
+
+  private def codeForValue(node: Value): Try[String] = Try {
     val lineNumber    = line(node).get
     val colNumber     = column(node).get - 1
     val lineEndNumber = lineEndNo(node).get
@@ -114,9 +113,6 @@ trait AstCreatorHelper { this: AstCreator =>
     }
   }
 
-  private def shortenCode(code: String, length: Int = MaxCodeLength): String =
-    StringUtils.abbreviate(code, math.max(MinCodeLength, length))
-
   protected def line(node: Value): Option[Integer] = Try(node(ParserKeys.NodeLineNo).num).toOption.map(_.toInt)
 
   protected def column(node: Value): Option[Integer] = Try(node(ParserKeys.NodeColNo).num).toOption.map(_.toInt)
@@ -135,8 +131,8 @@ trait AstCreatorHelper { this: AstCreator =>
       .toMap
   }
 
-  protected def resolveAliasToFullName(alias: String, typeOrMethodName: String): String = {
-    s"${aliasToNameSpaceMapping.getOrElse(alias, GoGlobal.aliasToNameSpaceMapping.getOrDefault(alias, s"${XDefines.Unknown}.<$alias>"))}.$typeOrMethodName"
+  protected def resolveAliasToFullName(alias: String): String = {
+    s"${aliasToNameSpaceMapping.getOrElse(alias, goGlobal.aliasToNameSpaceMapping.getOrDefault(alias, s"${XDefines.Unknown}.<$alias>"))}"
   }
   protected def generateTypeFullName(
     typeName: Option[String] = None,
@@ -160,7 +156,7 @@ trait AstCreatorHelper { this: AstCreator =>
               Defines.primitiveTypeMap.getOrElse(typname, s"$fullyQualifiedPackage.$typname")
             }
           case Some(alias) =>
-            resolveAliasToFullName(alias, typname)
+            s"${resolveAliasToFullName(alias)}.$typname"
 
   }
   private def internalTypeFullName(
@@ -251,20 +247,7 @@ trait AstCreatorHelper { this: AstCreator =>
     }
   }
 
-  protected def registerType(typeName: String): String = {
-    val fixedTypeName = fixQualifiedName(StringUtils.normalizeSpace(typeName))
-    GoGlobal.usedTypes.putIfAbsent(fixedTypeName, true)
-    fixedTypeName
-  }
-
   protected def fixQualifiedName(name: String): String =
     name.stripPrefix(Defines.qualifiedNameSeparator).replace(Defines.qualifiedNameSeparator, ".")
 
-  override protected def line(node: ParserNodeInfo): Option[Integer] = node.lineNumber
-
-  override protected def column(node: ParserNodeInfo): Option[Integer] = node.columnNumber
-
-  override protected def lineEnd(node: ParserNodeInfo): Option[Integer] = node.lineNumberEnd
-
-  override protected def columnEnd(node: ParserNodeInfo): Option[Integer] = node.columnNumberEnd
 }

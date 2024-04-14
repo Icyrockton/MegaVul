@@ -1,14 +1,12 @@
 package io.joern.console
 
-import org.apache.commons.lang.WordUtils
-import overflowdb.traversal.help.DocFinder._
-import overflowdb.traversal.help.{Table, DocFinder}
+import overflowdb.traversal.help.DocFinder.*
+import overflowdb.traversal.help.Table.AvailableWidthProvider
+import overflowdb.traversal.help.{DocFinder, Table}
 
 object Help {
 
-  private val width = 80
-
-  def overview(clazz: Class[_]): String = {
+  def overview(clazz: Class[?])(using AvailableWidthProvider): String = {
     val columnNames = List("command", "description", "example")
     val rows = DocFinder
       .findDocumentedMethodsOf(clazz)
@@ -39,7 +37,6 @@ object Help {
   def formatNoQuotes(text: String): String = {
     text.stripMargin
       .split("\n\n")
-      .map(x => WordUtils.wrap(x.replace("\n", " "), width))
       .mkString("\n\n")
       .trim
   }
@@ -55,7 +52,7 @@ object Help {
         |
         |""".stripMargin)
 
-  def codeForHelpCommand(clazz: Class[_]): String = {
+  def codeForHelpCommand(clazz: Class[?]): String = {
     val membersCode = DocFinder
       .findDocumentedMethodsOf(clazz)
       .map { case StepDoc(_, funcName, doc) =>

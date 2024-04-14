@@ -2,6 +2,7 @@ package io.joern.jimple2cpg
 
 import better.files.File
 import io.joern.jimple2cpg.passes.{AstCreationPass, DeclarationRefPass, SootAstCreationPass}
+import io.joern.jimple2cpg.util.Decompiler
 import io.joern.jimple2cpg.util.ProgramHandlingUtil.{ClassFile, extractClassesInPackageLayout}
 import io.joern.x2cpg.X2Cpg.withNewEmptyCpg
 import io.joern.x2cpg.X2CpgFrontend
@@ -46,18 +47,21 @@ class Jimple2Cpg extends X2CpgFrontend[Config] {
   /** Load all class files from archives or directories recursively
     * @param recurse
     *   Whether to unpack recursively
+    * @param depth
+    *   Maximum depth of recursion
     * @return
     *   The list of extracted class files whose package path could be extracted, placed on that package path relative to
     *   [[tmpDir]]
     */
-  private def loadClassFiles(src: File, tmpDir: File, recurse: Boolean): List[ClassFile] = {
+  private def loadClassFiles(src: File, tmpDir: File, recurse: Boolean, depth: Int): List[ClassFile] = {
     val archiveFileExtensions = Set(".jar", ".war", ".zip")
     extractClassesInPackageLayout(
       src,
       tmpDir,
       isClass = e => e.extension.contains(".class"),
       isArchive = e => e.extension.exists(archiveFileExtensions.contains),
-      recurse
+      recurse,
+      depth
     )
   }
 
@@ -68,11 +72,13 @@ class Jimple2Cpg extends X2CpgFrontend[Config] {
     *   The directory to place the class files in their package layout
     * @param recurse
     *   Whether to unpack recursively
+    * @param depth
+    *   Maximum depth of recursion
     */
-  private def sootLoad(input: File, tmpDir: File, recurse: Boolean): List[ClassFile] = {
+  private def sootLoad(input: File, tmpDir: File, recurse: Boolean, depth: Int): List[ClassFile] = {
     Options.v().set_soot_classpath(tmpDir.canonicalPath)
     Options.v().set_prepend_classpath(true)
-    val classFiles               = loadClassFiles(input, tmpDir, recurse)
+    val classFiles               = loadClassFiles(input, tmpDir, recurse, depth)
     val fullyQualifiedClassNames = classFiles.flatMap(_.fullyQualifiedClassName)
     logger.info(s"Loading ${classFiles.size} program files")
     logger.debug(s"Source files are: ${classFiles.map(_.file.canonicalPath)}")
@@ -101,7 +107,9 @@ class Jimple2Cpg extends X2CpgFrontend[Config] {
           astCreator.global
         }
       case _ =>
-        val classFiles = sootLoad(input, tmpDir, config.recurse)
+        val classFiles = sootLoad(input, tmpDir, config.recurse, config.depth)
+        decompileClassFiles(classFiles, !config.disableFileContent)
+
         { () =>
           val astCreator = AstCreationPass(classFiles, cpg, config)
           astCreator.createAndApply()
@@ -118,6 +126,23 @@ class Jimple2Cpg extends X2CpgFrontend[Config] {
       .withRegisteredTypes(global.usedTypes.keys().asScala.toList, cpg)
       .createAndApply()
     DeclarationRefPass(cpg).createAndApply()
+  }
+
+  private def decompileClassFiles(classFiles: List[ClassFile], decompileJava: Boolean): Unit = {
+    Option.when(decompileJava) {
+      val decompiler     = new Decompiler(classFiles.map(_.file))
+      val decompiledJava = decompiler.decompile()
+
+      classFiles.foreach(x => {
+        val decompiledJavaSrc = decompiledJava.get(x.fullyQualifiedClassName.get)
+        decompiledJavaSrc match {
+          case Some(src) =>
+            val outputFile = File(s"${x.file.pathAsString.replace(".class", ".java")}")
+            outputFile.write(src)
+          case None => // Do Nothing
+        }
+      })
+    }
   }
 
   override def createCpg(config: Config): Try[Cpg] =
@@ -144,6 +169,9 @@ class Jimple2Cpg extends X2CpgFrontend[Config] {
     // keep variable names
     Options.v().setPhaseOption("jb.sils", "enabled:false")
     Options.v().setPhaseOption("jb", "use-original-names:true")
+    // Keep exceptions
+    Options.v().set_show_exception_dests(true)
+    Options.v().set_omit_excepting_unit_edges(false)
     // output jimple
     Options.v().set_output_format(Options.output_format_jimple)
     Options.v().set_output_dir(outDir.canonicalPath)

@@ -3,22 +3,15 @@ package io.joern.kotlin2cpg.ast
 import io.joern.kotlin2cpg.Constants
 import io.joern.kotlin2cpg.ast.Nodes.modifierNode
 import io.joern.kotlin2cpg.types.{TypeConstants, TypeInfoProvider}
-import io.joern.x2cpg.utils.NodeBuilders
-import io.joern.x2cpg.{Ast, ValidationMode}
-import io.joern.x2cpg.utils.NodeBuilders.{newBindingNode, newClosureBindingNode, newLocalNode, newMethodReturnNode}
-import io.shiftleft.codepropertygraph.generated.{EdgeTypes, EvaluationStrategies, ModifierTypes}
-import io.shiftleft.codepropertygraph.generated.nodes.{NewBlock, NewLocal, NewMember, NewMethodParameterIn, NewNode}
-import org.jetbrains.kotlin.descriptors.DescriptorVisibilities
-import org.jetbrains.kotlin.psi.{
-  KtAnnotationEntry,
-  KtLambdaExpression,
-  KtNamedFunction,
-  KtParameter,
-  KtReturnExpression
-}
-import io.shiftleft.semanticcpg.language.*
-
 import io.joern.x2cpg.datastructures.Stack.StackWrapper
+import io.joern.x2cpg.utils.NodeBuilders
+import io.joern.x2cpg.utils.NodeBuilders.{newBindingNode, newClosureBindingNode, newMethodReturnNode, newModifierNode}
+import io.joern.x2cpg.{Ast, AstNodeBuilder, ValidationMode}
+import io.shiftleft.codepropertygraph.generated.nodes.*
+import io.shiftleft.codepropertygraph.generated.{EdgeTypes, EvaluationStrategies, ModifierTypes}
+import io.shiftleft.semanticcpg.language.*
+import org.jetbrains.kotlin.descriptors.DescriptorVisibilities
+import org.jetbrains.kotlin.psi.*
 
 import java.util.UUID.nameUUIDFromBytes
 import scala.jdk.CollectionConverters.*
@@ -57,7 +50,7 @@ trait AstForFunctionsCreator(implicit withSchemaValidation: ValidationMode) {
             val blockChildAsts =
               if (asts.nonEmpty) {
                 val allStatementsButLast = asts.dropRight(1)
-                val lastStatementAst     = asts.last
+                val lastStatementAst     = asts.lastOption.getOrElse(Ast(unknownNode(expr, Constants.empty)))
                 val returnAst_           = returnAst(returnNode(expr, Constants.retCode), Seq(lastStatementAst))
                 (allStatementsButLast ++ Seq(returnAst_)).toList
               } else List()
@@ -71,7 +64,7 @@ trait AstForFunctionsCreator(implicit withSchemaValidation: ValidationMode) {
     methodAstParentStack.pop()
     scope.popScope()
 
-    val bodyAst           = bodyAsts.head
+    val bodyAst           = bodyAsts.headOption.getOrElse(Ast(unknownNode(ktFn, Constants.empty)))
     val otherBodyAsts     = bodyAsts.drop(1)
     val explicitTypeName  = Option(ktFn.getTypeReference).map(_.getText).getOrElse(TypeConstants.any)
     val typeFullName      = registerType(typeInfoProvider.returnType(ktFn, explicitTypeName))
@@ -125,8 +118,9 @@ trait AstForFunctionsCreator(implicit withSchemaValidation: ValidationMode) {
     argNameMaybe: Option[String],
     annotations: Seq[KtAnnotationEntry] = Seq()
   )(implicit typeInfoProvider: TypeInfoProvider): Ast = {
-    val (fullName, signature) = typeInfoProvider.fullNameWithSignatureAsLambda(fn, lambdaKeyPool)
-    val lambdaMethodNode      = methodNode(fn, Constants.lambdaName, fullName, signature, relativizedPath)
+    val name                  = nextClosureName()
+    val (fullName, signature) = typeInfoProvider.fullNameWithSignatureAsLambda(fn, name)
+    val lambdaMethodNode      = methodNode(fn, name, fullName, signature, relativizedPath)
 
     case class NodeContext(node: NewNode, name: String, typeFullName: String)
     val closureBindingEntriesForCaptured = scope
@@ -146,7 +140,13 @@ trait AstForFunctionsCreator(implicit withSchemaValidation: ValidationMode) {
 
     val localsForCaptured = closureBindingEntriesForCaptured.map { case (closureBindingNode, capturedNodeContext) =>
       val node =
-        newLocalNode(capturedNodeContext.name, capturedNodeContext.typeFullName, closureBindingNode.closureBindingId)
+        localNode(
+          fn,
+          capturedNodeContext.name,
+          capturedNodeContext.name,
+          capturedNodeContext.typeFullName,
+          closureBindingNode.closureBindingId
+        )
       scope.addToScope(capturedNodeContext.name, node)
       node
     }
@@ -172,13 +172,14 @@ trait AstForFunctionsCreator(implicit withSchemaValidation: ValidationMode) {
     val returnTypeFullName     = TypeConstants.javaLangObject
     val lambdaTypeDeclFullName = fullName.split(":").head
 
-    val bodyAst = bodyAsts.head
+    val bodyAst = bodyAsts.headOption.getOrElse(Ast(unknownNode(fn, Constants.empty)))
     val lambdaMethodAst = methodAst(
       lambdaMethodNode,
       parametersAsts,
       bodyAst,
-      newMethodReturnNode(returnTypeFullName, None, line(fn), column(fn))
-    ).withChild(Ast(modifierNode(ModifierTypes.VIRTUAL)))
+      newMethodReturnNode(returnTypeFullName, None, line(fn), column(fn)),
+      modifierNode(ModifierTypes.VIRTUAL) :: modifierNode(ModifierTypes.LAMBDA) :: Nil
+    )
 
     val _methodRefNode =
       withArgumentIndex(methodRefNode(fn, fn.getText, fullName, lambdaTypeDeclFullName), argIdxMaybe)
@@ -215,8 +216,9 @@ trait AstForFunctionsCreator(implicit withSchemaValidation: ValidationMode) {
     argNameMaybe: Option[String],
     annotations: Seq[KtAnnotationEntry] = Seq()
   )(implicit typeInfoProvider: TypeInfoProvider): Ast = {
-    val (fullName, signature) = typeInfoProvider.fullNameWithSignature(expr, lambdaKeyPool)
-    val lambdaMethodNode      = methodNode(expr, Constants.lambdaName, fullName, signature, relativizedPath)
+    val name                  = nextClosureName()
+    val (fullName, signature) = typeInfoProvider.fullNameWithSignature(expr, name)
+    val lambdaMethodNode      = methodNode(expr, name, fullName, signature, relativizedPath)
 
     case class NodeContext(node: NewNode, name: String, typeFullName: String)
     val closureBindingEntriesForCaptured = scope
@@ -236,7 +238,13 @@ trait AstForFunctionsCreator(implicit withSchemaValidation: ValidationMode) {
 
     val localsForCaptured = closureBindingEntriesForCaptured.map { case (closureBindingNode, capturedNodeContext) =>
       val node =
-        newLocalNode(capturedNodeContext.name, capturedNodeContext.typeFullName, closureBindingNode.closureBindingId)
+        localNode(
+          expr,
+          capturedNodeContext.name,
+          capturedNodeContext.name,
+          capturedNodeContext.typeFullName,
+          closureBindingNode.closureBindingId
+        )
       scope.addToScope(capturedNodeContext.name, node)
       node
     }
@@ -293,13 +301,14 @@ trait AstForFunctionsCreator(implicit withSchemaValidation: ValidationMode) {
     val returnTypeFullName     = registerType(typeInfoProvider.returnTypeFullName(expr))
     val lambdaTypeDeclFullName = fullName.split(":").head
 
-    val bodyAst = bodyAsts.head
+    val bodyAst = bodyAsts.headOption.getOrElse(Ast(unknownNode(expr, Constants.empty)))
     val lambdaMethodAst = methodAst(
       lambdaMethodNode,
       parametersAsts,
       bodyAst,
-      newMethodReturnNode(returnTypeFullName, None, line(expr), column(expr))
-    ).withChild(Ast(modifierNode(ModifierTypes.VIRTUAL)))
+      newMethodReturnNode(returnTypeFullName, None, line(expr), column(expr)),
+      newModifierNode(ModifierTypes.VIRTUAL) :: newModifierNode(ModifierTypes.LAMBDA) :: Nil
+    )
 
     val _methodRefNode =
       withArgumentIndex(methodRefNode(expr, expr.getText, fullName, lambdaTypeDeclFullName), argIdxMaybe)
@@ -331,7 +340,12 @@ trait AstForFunctionsCreator(implicit withSchemaValidation: ValidationMode) {
   }
 
   def astForReturnExpression(expr: KtReturnExpression)(implicit typeInfoProvider: TypeInfoProvider): Ast = {
-    val children = astsForExpression(expr.getReturnedExpression, None)
-    returnAst(returnNode(expr, expr.getText), children.toList)
+    val returnedExpr =
+      if (expr.getReturnedExpression != null) {
+        astsForExpression(expr.getReturnedExpression, None)
+      } else {
+        Nil
+      }
+    returnAst(returnNode(expr, expr.getText), returnedExpr)
   }
 }

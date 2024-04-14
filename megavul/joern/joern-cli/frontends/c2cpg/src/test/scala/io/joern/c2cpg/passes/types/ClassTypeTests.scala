@@ -1,22 +1,21 @@
 package io.joern.c2cpg.passes.types
 
 import io.joern.c2cpg.parser.FileDefaults
-import io.joern.c2cpg.testfixtures.CCodeToCpgSuite
+import io.joern.c2cpg.testfixtures.C2CpgSuite
 import io.shiftleft.semanticcpg.language._
 import io.shiftleft.semanticcpg.language.types.structure.NamespaceTraversal
 
-class ClassTypeTests extends CCodeToCpgSuite(FileDefaults.CPP_EXT) {
+class ClassTypeTests extends C2CpgSuite(FileDefaults.CPP_EXT) {
 
   "handling C++ classes (code example 1)" should {
     val cpg = code("""
-        | class Foo {
-        |  member_type x;
-        | };
-        |
-        | ret_type myFunc(param_type param) {
-        |   local_type y;
-        | }
-        |""".stripMargin)
+      |class Foo {
+      |  member_type x;
+      |};
+      |
+      |ret_type myFunc(param_type param) {
+      |  local_type y;
+      |}""".stripMargin)
 
     "create TYPE node with correct fields for class member" in {
       val List(x) = cpg.typ.name("member_type").l
@@ -65,13 +64,12 @@ class ClassTypeTests extends CCodeToCpgSuite(FileDefaults.CPP_EXT) {
 
   "handling C++ classes (code example 2)" should {
     val cpg = code("""
-        | class foo : bar {
-        |   char x;
-        |   int y;
-        |   int method () {}
-        | };
-        |
-        | typedef int mytype;""".stripMargin)
+      |class foo : bar {
+      |  char x;
+      |  int y;
+      |  int method () {}
+      |};
+      |typedef int mytype;""".stripMargin)
 
     "should contain a type decl for `foo` with correct fields" in {
       val List(x) = cpg.typeDecl("foo").l
@@ -89,7 +87,7 @@ class ClassTypeTests extends CCodeToCpgSuite(FileDefaults.CPP_EXT) {
       x.fullName shouldBe "mytype"
       x.isExternal shouldBe false
       x.inheritsFromTypeFullName shouldBe List()
-      x.aliasTypeFullName shouldBe Some("int")
+      x.aliasTypeFullName shouldBe Option("int")
       x.code shouldBe "typedef int mytype;"
       x.order shouldBe 2
       x.filename shouldBe "Test0.cpp"
@@ -129,6 +127,34 @@ class ClassTypeTests extends CCodeToCpgSuite(FileDefaults.CPP_EXT) {
 
     "should allow traversing from type to enclosing file" in {
       cpg.typeDecl.file.filter(_.name.endsWith(FileDefaults.CPP_EXT)).l should not be empty
+    }
+  }
+  "handling C++ classes (code example 3)" should {
+    "generate correct call fullnames" in {
+      val cpg = code("""
+        |class B {
+        |public:
+        |  void foo2() {}
+        |};
+        |
+        |class A {
+        |private:
+        |  B b;
+        |
+        |public:
+        |  void foo1() {
+        |    b.foo2();
+        |   }
+        |};
+        |
+        |int main() {
+        |  A a;
+        |  a.foo1();
+        |  return 0;
+        |}""".stripMargin)
+
+      val List(call) = cpg.call("foo2").l
+      call.methodFullName shouldBe "B.foo2"
     }
   }
 

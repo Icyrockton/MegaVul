@@ -1,18 +1,19 @@
 package io.joern.x2cpg
 
 import better.files.File.VisitOptions
-import better.files._
+import better.files.*
 import org.slf4j.LoggerFactory
 
 import java.io.FileNotFoundException
 import java.nio.file.Paths
+import scala.util.matching.Regex
 
 object SourceFiles {
 
   private val logger = LoggerFactory.getLogger(getClass)
 
-  private def isIgnoredByFileList(filePath: String, config: X2CpgConfig[_]): Boolean = {
-    val isInIgnoredFiles = config.ignoredFiles.exists {
+  private def isIgnoredByFileList(filePath: String, ignoredFiles: Seq[String]): Boolean = {
+    val isInIgnoredFiles = ignoredFiles.exists {
       case ignorePath if File(ignorePath).isDirectory => filePath.startsWith(ignorePath)
       case ignorePath                                 => filePath == ignorePath
     }
@@ -24,9 +25,9 @@ object SourceFiles {
     }
   }
 
-  private def isIgnoredByDefault(filePath: String, config: X2CpgConfig[_]): Boolean = {
-    val relPath = toRelativePath(filePath, config.inputPath)
-    if (config.defaultIgnoredFilesRegex.exists(_.matches(relPath))) {
+  private def isIgnoredByDefaultRegex(filePath: String, inputPath: String, ignoredDefaultRegex: Seq[Regex]): Boolean = {
+    val relPath = toRelativePath(filePath, inputPath)
+    if (ignoredDefaultRegex.exists(_.matches(relPath))) {
       logger.debug(s"'$relPath' ignored by default")
       true
     } else {
@@ -34,9 +35,9 @@ object SourceFiles {
     }
   }
 
-  private def isIgnoredByRegex(filePath: String, config: X2CpgConfig[_]): Boolean = {
-    val relPath               = toRelativePath(filePath, config.inputPath)
-    val isInIgnoredFilesRegex = config.ignoredFilesRegex.matches(relPath)
+  private def isIgnoredByRegex(filePath: String, inputPath: String, ignoredFilesRegex: Regex): Boolean = {
+    val relPath               = toRelativePath(filePath, inputPath)
+    val isInIgnoredFilesRegex = ignoredFilesRegex.matches(relPath)
     if (isInIgnoredFilesRegex) {
       logger.debug(s"'$relPath' ignored (--exclude-regex)")
       true
@@ -45,36 +46,56 @@ object SourceFiles {
     }
   }
 
-  private def filterFiles(files: List[String], config: X2CpgConfig[_]): List[String] = files.filter {
-    case filePath if isIgnoredByDefault(filePath, config)  => false
-    case filePath if isIgnoredByFileList(filePath, config) => false
-    case filePath if isIgnoredByRegex(filePath, config)    => false
-    case _                                                 => true
-  }
-
-  /** For a given input path, determine all source files by inspecting filename extensions.
+  /** Method to filter file based on the passed parameters
+    * @param file
+    * @param inputPath
+    * @param ignoredDefaultRegex
+    * @param ignoredFilesRegex
+    * @param ignoredFilesPath
+    * @return
     */
-  def determine(inputPath: String, sourceFileExtensions: Set[String]): List[String] = {
-    determine(Set(inputPath), sourceFileExtensions)
-  }
+  def filterFile(
+    file: String,
+    inputPath: String,
+    ignoredDefaultRegex: Option[Seq[Regex]] = None,
+    ignoredFilesRegex: Option[Regex] = None,
+    ignoredFilesPath: Option[Seq[String]] = None
+  ): Boolean = !ignoredDefaultRegex.exists(isIgnoredByDefaultRegex(file, inputPath, _))
+    && !ignoredFilesRegex.exists(isIgnoredByRegex(file, inputPath, _))
+    && !ignoredFilesPath.exists(isIgnoredByFileList(file, _))
 
-  /** For a given input path, determine all source files by inspecting filename extensions and filter the result
-    * according to the given config (by its ignoredFilesRegex and ignoredFiles).
-    */
-  def determine(inputPath: String, sourceFileExtensions: Set[String], config: X2CpgConfig[_]): List[String] = {
-    determine(Set(inputPath), sourceFileExtensions, config)
-  }
+  private def filterFiles(
+    files: List[String],
+    inputPath: String,
+    ignoredDefaultRegex: Option[Seq[Regex]] = None,
+    ignoredFilesRegex: Option[Regex] = None,
+    ignoredFilesPath: Option[Seq[String]] = None
+  ): List[String] = files.filter(filterFile(_, inputPath, ignoredDefaultRegex, ignoredFilesRegex, ignoredFilesPath))
 
-  /** For given input paths, determine all source files by inspecting filename extensions and filter the result
-    * according to the given config (by its ignoredFilesRegex and ignoredFiles).
+  /** For given input paths, determine all source files by inspecting filename extensions and filter the result if
+    * following arguments ignoredDefaultRegex, ignoredFilesRegex and ignoredFilesPath are used
     */
-  def determine(inputPaths: Set[String], sourceFileExtensions: Set[String], config: X2CpgConfig[_]): List[String] = {
-    filterFiles(determine(inputPaths, sourceFileExtensions), config)
+  def determine(
+    inputPath: String,
+    sourceFileExtensions: Set[String],
+    ignoredDefaultRegex: Option[Seq[Regex]] = None,
+    ignoredFilesRegex: Option[Regex] = None,
+    ignoredFilesPath: Option[Seq[String]] = None
+  )(implicit visitOptions: VisitOptions = VisitOptions.follow): List[String] = {
+    filterFiles(
+      determine(Set(inputPath), sourceFileExtensions),
+      inputPath,
+      ignoredDefaultRegex,
+      ignoredFilesRegex,
+      ignoredFilesPath
+    )
   }
 
   /** For a given array of input paths, determine all source files by inspecting filename extensions.
     */
-  def determine(inputPaths: Set[String], sourceFileExtensions: Set[String]): List[String] = {
+  def determine(inputPaths: Set[String], sourceFileExtensions: Set[String])(implicit
+    visitOptions: VisitOptions
+  ): List[String] = {
     def hasSourceFileExtension(file: File): Boolean =
       file.extension.exists(sourceFileExtensions.contains)
 
@@ -85,7 +106,7 @@ object SourceFiles {
 
     val matchingFiles = files.filter(hasSourceFileExtension).map(_.toString)
     val matchingFilesFromDirs = dirs
-      .flatMap(_.listRecursively(VisitOptions.follow))
+      .flatMap(_.listRecursively)
       .filter(hasSourceFileExtension)
       .map(_.pathAsString)
 
@@ -114,8 +135,7 @@ object SourceFiles {
     pathsArray.lengthCompare(1) match {
       case cmp if cmp < 0  => // pathsArray is empty, so don't log anything
       case cmp if cmp == 0 => logger.error(s"$message: ${paths.head}")
-
-      case cmp =>
+      case _ =>
         val errorMessage = (message +: pathsArray.map(path => s"- $path")).mkString("\n")
         logger.error(errorMessage)
     }

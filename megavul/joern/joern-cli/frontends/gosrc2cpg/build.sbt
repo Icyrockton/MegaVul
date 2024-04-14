@@ -5,16 +5,13 @@ import com.typesafe.config.{Config, ConfigFactory}
 
 name := "gosrc2cpg"
 
-dependsOn(Projects.dataflowengineoss, Projects.x2cpg % "compile->compile;test->test")
+dependsOn(Projects.dataflowengineoss % "compile->compile;test->test", Projects.x2cpg % "compile->compile;test->test")
 
 libraryDependencies ++= Seq(
   "io.shiftleft"              %% "codepropertygraph" % Versions.cpg,
   "org.scalatest"             %% "scalatest"         % Versions.scalatest % Test,
-  "com.lihaoyi"               %% "upickle"           % Versions.upickle,
-  "com.lihaoyi"               %% "os-lib"            % "0.9.1",
-  "com.fasterxml.jackson.core" % "jackson-databind"  % "2.15.2",
-  "com.typesafe"               % "config"            % "1.4.2",
-  "com.michaelpollmeier"       % "versionsort"       % "1.0.11",
+  "com.lihaoyi"               %% "os-lib"            % "0.9.3",
+  "com.fasterxml.jackson.core" % "jackson-databind"  % "2.17.0",
   "io.circe"                  %% "circe-core"        % Versions.circe,
   "io.circe"                  %% "circe-generic"     % Versions.circe,
   "io.circe"                  %% "circe-parser"      % Versions.circe
@@ -81,19 +78,13 @@ goAstGenBinaryNames := {
 
 lazy val goAstGenDlTask = taskKey[Unit](s"Download goastgen binaries")
 goAstGenDlTask := {
-  val goAstGenDir = baseDirectory.value / "bin" / "goastgen"
-  goAstGenDir.mkdirs()
+  val goAstGenDir = baseDirectory.value / "bin" / "astgen"
 
   goAstGenBinaryNames.value.foreach { fileName =>
-    val dest = goAstGenDir / fileName
-    if (!dest.exists) {
-      val url            = s"${goAstGenDlUrl.value}$fileName"
-      val downloadedFile = SimpleCache.downloadMaybe(url)
-      IO.copyFile(downloadedFile, dest)
-    }
+    DownloadHelper.ensureIsAvailable(s"${goAstGenDlUrl.value}$fileName", goAstGenDir / fileName)
   }
 
-  val distDir = (Universal / stagingDirectory).value / "bin" / "goastgen"
+  val distDir = (Universal / stagingDirectory).value / "bin" / "astgen"
   distDir.mkdirs()
   IO.copyDirectory(goAstGenDir, distDir)
 
@@ -111,11 +102,3 @@ stage := Def
   .sequential(goAstGenSetAllPlatforms, Universal / stage)
   .andFinally(System.setProperty("ALL_PLATFORMS", "FALSE"))
   .value
-
-// Also remove astgen binaries with clean, e.g., to allow for updating them.
-// Sadly, we can't define the bin/ folders globally,
-// as .value can only be used within a task or setting macro
-cleanFiles ++= Seq(
-  baseDirectory.value / "bin" / "goastgen",
-  (Universal / stagingDirectory).value / "bin" / "goastgen"
-) ++ goAstGenBinaryNames.value.map(fileName => SimpleCache.encodeFile(s"${goAstGenDlUrl.value}$fileName"))

@@ -5,8 +5,7 @@ import io.joern.gosrc2cpg.parser.{ParserKeys, ParserNodeInfo}
 import io.joern.x2cpg.datastructures.Stack.*
 import io.joern.x2cpg.utils.NodeBuilders
 import io.joern.x2cpg.{Ast, ValidationMode}
-import io.shiftleft.codepropertygraph.generated.nodes.*
-import io.shiftleft.codepropertygraph.generated.{EvaluationStrategies, NodeTypes, PropertyNames}
+import io.shiftleft.codepropertygraph.generated.{EvaluationStrategies, NodeTypes}
 import ujson.Value
 
 import scala.collection.mutable
@@ -16,26 +15,33 @@ import scala.util.{Failure, Success, Try}
 trait AstForFunctionsCreator(implicit withSchemaValidation: ValidationMode) { this: AstCreator =>
 
   def astForFuncDecl(funcDecl: ParserNodeInfo): Seq[Ast] = {
-    val (name, methodFullname, signature, params, receiverInfo, genericTypeMethodMap) = processFuncDecl(funcDecl.json)
+    val methodMetadata = processFuncDecl(funcDecl.json)
     // TODO: handle multiple return type or tuple (int, int)
     val (returnTypeStr, returnTypeInfo) =
-      getReturnType(funcDecl.json(ParserKeys.Type), genericTypeMethodMap).headOption
+      getReturnType(funcDecl.json(ParserKeys.Type), methodMetadata.genericTypeMethodMap).headOption
         .getOrElse((Defines.voidTypeName, funcDecl))
     val methodReturn = methodReturnNode(returnTypeInfo, returnTypeStr)
-    val methodNode_  = methodNode(funcDecl, name, funcDecl.code, methodFullname, Some(signature), relPathFileName)
+    val methodNode_ = methodNode(
+      funcDecl,
+      methodMetadata.name,
+      funcDecl.code,
+      methodMetadata.methodFullname,
+      Some(methodMetadata.signature),
+      relPathFileName
+    )
     methodAstParentStack.push(methodNode_)
     scope.pushNewScope(methodNode_)
-    val receiverNode = astForReceiver(receiverInfo)
+    val receiverNode = astForReceiver(methodMetadata.receiverInfo)
     val astForMethod =
       methodAst(
         methodNode_,
-        receiverNode ++ astForMethodParameter(params, genericTypeMethodMap),
+        receiverNode ++ astForMethodParameter(methodMetadata.params, methodMetadata.genericTypeMethodMap),
         astForMethodBody(funcDecl.json(ParserKeys.Body)),
         methodReturn
       )
     scope.popScope()
     methodAstParentStack.pop()
-    receiverInfo match
+    methodMetadata.receiverInfo match
       case Some(_, typeFullName, _, _) =>
         // if method is related to Struct then fill astParentFullName and astParentType
         methodNode_.astParentType(NodeTypes.TYPE_DECL).astParentFullName(typeFullName)
@@ -87,7 +93,7 @@ trait AstForFunctionsCreator(implicit withSchemaValidation: ValidationMode) { th
       case _ => None
   }
 
-  private def astForMethodParameter(params: Value, genericTypeMethodMap: Map[String, List[String]]): Seq[Ast] = {
+  protected def astForMethodParameter(params: Value, genericTypeMethodMap: Map[String, List[String]]): Seq[Ast] = {
     var index = 1
     params.arrOpt
       .getOrElse(List())
@@ -127,7 +133,18 @@ trait AstForFunctionsCreator(implicit withSchemaValidation: ValidationMode) { th
         val typeInfo                                           = createParserNodeInfo(x(ParserKeys.Type))
         val (typeFullName, typeFullNameForcode, isVariadic, _) = processTypeInfo(typeInfo, genericTypeMethodMap)
         x(ParserKeys.Names).arrOpt
-          .getOrElse(List())
+          /*
+          While generating the signature for a function structure
+                   func test(a, b int, c string) int {
+                   }
+          it works as there is no situation where parameter name will not be there.
+
+          As we re reuse the same function for generating the signature for lambda types as below
+                   type Operation func(int, int) int
+          Now in this case there is no parameter name exist, in order to handle this situation add this empty string as default value,
+          which only facilitates adding the parameter type to list.
+           */
+          .getOrElse(List(""))
           .map(_ => {
             // We are returning same type from x object for each name in the names array.
             typeFullName

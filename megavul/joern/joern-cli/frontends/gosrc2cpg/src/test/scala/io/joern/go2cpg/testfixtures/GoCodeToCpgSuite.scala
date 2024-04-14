@@ -1,58 +1,60 @@
 package io.joern.go2cpg.testfixtures
 
 import better.files.File
-import io.joern.dataflowengineoss.layers.dataflows.{OssDataFlow, OssDataFlowOptions}
-import io.joern.dataflowengineoss.queryengine.EngineContext
+import io.joern.dataflowengineoss.semanticsloader.FlowSemantic
+import io.joern.dataflowengineoss.testfixtures.{SemanticCpgTestFixture, SemanticTestCpg}
 import io.joern.gosrc2cpg.datastructures.GoGlobal
+import io.joern.gosrc2cpg.model.GoModHelper
 import io.joern.gosrc2cpg.{Config, GoSrc2Cpg}
-import io.joern.x2cpg.X2Cpg
-import io.joern.x2cpg.testfixtures.{Code2CpgFixture, DefaultTestCpg, LanguageFrontend}
+import io.joern.x2cpg.testfixtures.{Code2CpgFixture, DefaultTestCpg}
 import io.shiftleft.codepropertygraph.Cpg
 import io.shiftleft.semanticcpg.language.{ICallResolver, NoResolve}
-import io.shiftleft.semanticcpg.layers.LayerCreatorContext
 import org.scalatest.Inside
-trait Go2CpgFrontend extends LanguageFrontend {
+class DefaultTestCpgWithGo(val fileSuffix: String) extends DefaultTestCpg with SemanticTestCpg {
+
+  private var goGlobal: Option[GoGlobal]   = None
+  private var goSrc2Cpg: Option[GoSrc2Cpg] = None
+  override protected def applyPasses(): Unit = {
+    super.applyPasses()
+    applyOssDataFlow()
+  }
+
+  def withGoGlobal(goGlobal: GoGlobal): this.type = {
+    setGoGlobal(goGlobal)
+    this
+  }
+
+  private def setGoGlobal(goGlobal: GoGlobal): Unit = {
+    if (this.goGlobal.isDefined) {
+      throw new RuntimeException("Frontend GoGlobal may only be set once per test")
+    }
+    this.goGlobal = Some(goGlobal)
+  }
+
   def execute(sourceCodePath: java.io.File): Cpg = {
     val cpgOutFile = File.newTemporaryFile("go2cpg.bin")
     cpgOutFile.deleteOnExit()
-    val go2cpg = new GoSrc2Cpg()
+    goSrc2Cpg = Some(new GoSrc2Cpg(this.goGlobal))
     val config = getConfig()
       .collectFirst { case x: Config => x }
       .getOrElse(Config())
       .withInputPath(sourceCodePath.getAbsolutePath)
       .withOutputPath(cpgOutFile.pathAsString)
-    go2cpg.createCpg(config).get
+    goSrc2Cpg.get.createCpg(config).get
   }
+
+  def getModHelper(): GoModHelper = goSrc2Cpg.get.getGoModHelper
 }
 
-class DefaultTestCpgWithGo(val fileSuffix: String) extends DefaultTestCpg with Go2CpgFrontend {
-
-  private var _withOssDataflow = false
-
-  def withOssDataflow(value: Boolean = true): this.type = {
-    _withOssDataflow = value
-    this
-  }
-
-  override def applyPasses(): Unit = {
-    X2Cpg.applyDefaultOverlays(this)
-    if (_withOssDataflow) {
-      val context = new LayerCreatorContext(this)
-      val options = new OssDataFlowOptions()
-      new OssDataFlow(options).run(context)
-    }
-  }
-}
-
-class GoCodeToCpgSuite(fileSuffix: String = ".go", withOssDataflow: Boolean = false)
-    extends Code2CpgFixture(() => new DefaultTestCpgWithGo(fileSuffix).withOssDataflow(withOssDataflow))
+class GoCodeToCpgSuite(
+  fileSuffix: String = ".go",
+  withOssDataflow: Boolean = false,
+  extraFlows: List[FlowSemantic] = List.empty
+) extends Code2CpgFixture(() =>
+      new DefaultTestCpgWithGo(fileSuffix).withOssDataflow(withOssDataflow).withExtraFlows(extraFlows)
+    )
+    with SemanticCpgTestFixture(extraFlows)
     with Inside {
-  implicit val resolver: ICallResolver           = NoResolve
-  implicit lazy val engineContext: EngineContext = EngineContext()
+  implicit val resolver: ICallResolver = NoResolve
 
-  override def beforeEach(): Unit = {
-    GoGlobal.methodFullNameReturnTypeMap.clear()
-    GoGlobal.aliasToNameSpaceMapping.clear()
-    GoGlobal.structTypeMemberTypeMapping.clear()
-  }
 }

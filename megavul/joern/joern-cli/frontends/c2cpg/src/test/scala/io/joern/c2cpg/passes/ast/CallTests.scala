@@ -1,13 +1,13 @@
 package io.joern.c2cpg.passes.ast
 
-import io.joern.c2cpg.testfixtures.CCodeToCpgSuite
+import io.joern.c2cpg.testfixtures.C2CpgSuite
 import io.shiftleft.codepropertygraph.generated.Operators
 import io.shiftleft.codepropertygraph.generated.nodes.Call
 import io.shiftleft.codepropertygraph.generated.nodes.Literal
 import io.shiftleft.semanticcpg.language.NoResolve
 import io.shiftleft.semanticcpg.language._
 
-class CallTests extends CCodeToCpgSuite {
+class CallTests extends C2CpgSuite {
 
   implicit val resolver: NoResolve.type = NoResolve
 
@@ -173,6 +173,32 @@ class CallTests extends CCodeToCpgSuite {
       bMethod.fullName shouldBe "A.b"
       bMethod.callIn.head shouldBe bCall
       bCall.callee.head shouldBe bMethod
+    }
+  }
+
+  "CallTest 6" should {
+    val cpg = code(
+      """
+        |class A {
+        |  public:
+        |    void foo1(){
+        |      foo2();
+        |    }
+        |	static void foo2() {}
+        |};
+        |
+        |int main() {
+        |  A a;
+        |  a.foo1();
+        |}
+        |""".stripMargin,
+      "test.cpp"
+    )
+    "have correct type full names for calls" in {
+      val List(foo2Call) = cpg.call("foo2").l
+      foo2Call.methodFullName shouldBe "A.foo2"
+      val List(foo2Method) = cpg.method("foo2").l
+      foo2Method.fullName shouldBe "A.foo2"
     }
   }
 

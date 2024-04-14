@@ -9,17 +9,19 @@ import io.joern.console.workspacehandling.{Project, WorkspaceLoader, WorkspaceMa
 import io.joern.x2cpg.X2Cpg.defaultOverlayCreators
 import io.shiftleft.codepropertygraph.Cpg
 import io.shiftleft.codepropertygraph.cpgloading.CpgLoader
-import io.shiftleft.semanticcpg.language._
+import io.shiftleft.semanticcpg.language.*
 import io.shiftleft.semanticcpg.language.dotextension.ImageViewer
 import io.shiftleft.semanticcpg.layers.{LayerCreator, LayerCreatorContext}
 import overflowdb.traversal.help.Doc
+import overflowdb.traversal.help.Table.AvailableWidthProvider
 
 import scala.sys.process.Process
 import scala.util.control.NoStackTrace
 import scala.util.{Failure, Success, Try}
 
-class Console[T <: Project](loader: WorkspaceLoader[T], baseDir: File = File.currentWorkingDirectory)
-    extends Reporting {
+class Console[T <: Project](loader: WorkspaceLoader[T], baseDir: File = File.currentWorkingDirectory)(implicit
+  availableWidthProvider: AvailableWidthProvider
+) extends Reporting {
 
   import Console._
 
@@ -27,7 +29,7 @@ class Console[T <: Project](loader: WorkspaceLoader[T], baseDir: File = File.cur
   def config: ConsoleConfig = _config
   def console: Console[T]   = this
 
-  protected var workspaceManager: WorkspaceManager[T] = _
+  protected var workspaceManager: WorkspaceManager[T] = scala.compiletime.uninitialized
   switchWorkspace(baseDir.path.resolve("workspace").toString)
   protected def workspacePathName: String = workspaceManager.getPath
 
@@ -409,7 +411,7 @@ class Console[T <: Project](loader: WorkspaceLoader[T], baseDir: File = File.cur
     val appliedOverlays = io.shiftleft.semanticcpg.Overlays.appliedOverlays(cpg)
     if (appliedOverlays.isEmpty) {
       report("Adding default overlays to base CPG")
-      _runAnalyzer(defaultOverlayCreators(): _*)
+      _runAnalyzer(defaultOverlayCreators()*)
     }
     cpg
   }

@@ -3,15 +3,17 @@ object Versions {
   val cpg = parseVersion("cpgVersion")
   // Dont upgrade antlr to 4.10 or above since those versions require java 11 or higher which
   // causes problems upstreams.
-  val antlr         = "4.7"
-  val scalatest     = "3.2.16"
-  val cats          = "3.5.0"
-  val json4s        = "4.0.6"
-  val gradleTooling = "8.3"
-  val circe         = "0.14.5"
-  val requests      = "0.8.0"
-  val upickle       = "3.1.3"
-  val scalaReplPP   = "0.1.72"
+  val antlr          = "4.7.2"
+  val scalatest      = "3.2.18"
+  val cats           = "3.5.4"
+  val json4s         = "4.0.7"
+  val gradleTooling  = "8.3"
+  val circe          = "0.14.6"
+  val requests       = "0.8.0"
+  val upickle        = "3.2.0"
+  val scalaReplPP    = "0.1.85"
+  val typeSafeConfig = "1.4.3"
+  val versionSort    = "1.0.11"
 
   private def parseVersion(key: String): String = {
     val versionRegexp = s""".*val $key[ ]+=[ ]?"(.*?)"""".r

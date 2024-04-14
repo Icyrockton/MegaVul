@@ -23,18 +23,31 @@ import io.shiftleft.codepropertygraph.generated.nodes.{
   NewTypeRef,
   NewUnknown
 }
-import org.apache.commons.lang.StringUtils
+import org.apache.commons.lang3.StringUtils
+
+import scala.util.Try
 trait AstNodeBuilder[Node, NodeProcessor] { this: NodeProcessor =>
   protected def line(node: Node): Option[Integer]
   protected def column(node: Node): Option[Integer]
   protected def lineEnd(node: Node): Option[Integer]
   protected def columnEnd(element: Node): Option[Integer]
 
+  private val MinCodeLength: Int        = 50
+  private val DefaultMaxCodeLength: Int = 1000
+  // maximum length of code fields in number of characters
+  private lazy val MaxCodeLength: Int =
+    sys.env.get("JOERN_MAX_CODE_LENGTH").flatMap(_.toIntOption).getOrElse(DefaultMaxCodeLength)
+
+  protected def code(node: Node): String
+
+  protected def shortenCode(code: String): String =
+    StringUtils.abbreviate(code, math.max(MinCodeLength, MaxCodeLength))
+
   protected def offset(node: Node): Option[(Int, Int)] = None
 
   protected def unknownNode(node: Node, code: String): NewUnknown = {
     NewUnknown()
-      .parserTypeName(node.getClass.getSimpleName)
+      .parserTypeName(Try(node.getClass.getSimpleName).toOption.getOrElse(Defines.Unknown))
       .code(code)
       .lineNumber(line(node))
       .columnNumber(column(node))
@@ -129,7 +142,7 @@ trait AstNodeBuilder[Node, NodeProcessor] { this: NodeProcessor =>
     inherits: Seq[String] = Seq.empty,
     alias: Option[String] = None
   ): NewTypeDecl = {
-    NewTypeDecl()
+    val node_ = NewTypeDecl()
       .name(name)
       .fullName(fullName)
       .code(code)
@@ -141,6 +154,10 @@ trait AstNodeBuilder[Node, NodeProcessor] { this: NodeProcessor =>
       .aliasTypeFullName(alias)
       .lineNumber(line(node))
       .columnNumber(column(node))
+    offset(node).foreach { case (offset, offsetEnd) =>
+      node_.offset(offset).offsetEnd(offsetEnd)
+    }
+    node_
   }
 
   protected def parameterInNode(
@@ -152,7 +169,7 @@ trait AstNodeBuilder[Node, NodeProcessor] { this: NodeProcessor =>
     evaluationStrategy: String,
     typeFullName: String
   ): NewMethodParameterIn =
-    parameterInNode(node, name, code, index, isVariadic, evaluationStrategy, Some(typeFullName))
+    parameterInNode(node, name, code, index, isVariadic, evaluationStrategy, Option(typeFullName))
 
   protected def parameterInNode(
     node: Node,
@@ -268,7 +285,7 @@ trait AstNodeBuilder[Node, NodeProcessor] { this: NodeProcessor =>
   }
 
   def methodNode(node: Node, name: String, fullName: String, signature: String, fileName: String): NewMethod = {
-    methodNode(node, name, name, fullName, Some(signature), fileName)
+    methodNode(node, name, name, fullName, Option(signature), fileName)
   }
 
   protected def methodNode(

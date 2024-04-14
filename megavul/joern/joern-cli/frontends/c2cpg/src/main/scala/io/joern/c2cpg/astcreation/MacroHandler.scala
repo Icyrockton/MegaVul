@@ -11,11 +11,10 @@ import io.shiftleft.codepropertygraph.generated.nodes.{
 }
 import io.joern.x2cpg.{Ast, AstEdge, ValidationMode}
 import io.shiftleft.codepropertygraph.generated.nodes.NewLocal
-import org.apache.commons.lang.StringUtils
+import org.apache.commons.lang3.StringUtils
 import org.eclipse.cdt.core.dom.ast.{IASTMacroExpansionLocation, IASTNode, IASTPreprocessorMacroDefinition}
 import org.eclipse.cdt.core.dom.ast.IASTBinaryExpression
 import org.eclipse.cdt.internal.core.model.ASTStringUtil
-import org.eclipse.cdt.internal.core.parser.scanner.MacroArgumentExtractor
 
 import scala.annotation.nowarn
 import scala.collection.mutable
@@ -154,7 +153,7 @@ trait MacroHandler(implicit withSchemaValidation: ValidationMode) { this: AstCre
   @nowarn
   def nodeSignature(node: IASTNode): String = {
     import org.eclipse.cdt.core.dom.ast.ASTSignatureUtil.getNodeSignature
-    val sig = if (isExpandedFromMacro(node)) {
+    if (isExpandedFromMacro(node)) {
       val sig = getNodeSignature(node)
       if (sig.isEmpty) {
         node.getRawSignature
@@ -164,7 +163,6 @@ trait MacroHandler(implicit withSchemaValidation: ValidationMode) { this: AstCre
     } else {
       node.getRawSignature
     }
-    shortenCode(sig)
   }
 
   private def isExpandedFromMacro(node: IASTNode): Boolean = expandedFromMacro(node).nonEmpty

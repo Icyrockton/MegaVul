@@ -11,6 +11,7 @@ import org.slf4j.LoggerFactory
 import versionsort.VersionHelper
 
 import java.nio.file.Paths
+import java.util.regex.Pattern
 import scala.util.Failure
 import scala.util.Success
 import scala.util.matching.Regex
@@ -22,9 +23,34 @@ object AstGenRunner {
 
   private val LineLengthThreshold: Int = 10000
 
+  private val NODE_OPTIONS: Map[String, String] = Map("NODE_OPTIONS" -> "--max-old-space-size=8192")
+
   private val TypeDefinitionFileExtensions = List(".t.ts", ".d.ts")
 
   private val MinifiedPathRegex: Regex = ".*([.-]min\\..*js|bundle\\.js)".r
+
+  private val AstGenDefaultIgnoreRegex: Seq[Regex] =
+    List(
+      "(conf|test|spec|[.-]min|\\.d)\\.(js|ts|jsx|tsx)$".r,
+      s"node_modules${Pattern.quote(java.io.File.separator)}.*".r,
+      s"venv${Pattern.quote(java.io.File.separator)}.*".r,
+      s"docs${Pattern.quote(java.io.File.separator)}.*".r,
+      s"test${Pattern.quote(java.io.File.separator)}.*".r,
+      s"tests${Pattern.quote(java.io.File.separator)}.*".r,
+      s"e2e${Pattern.quote(java.io.File.separator)}.*".r,
+      s"e2e-beta${Pattern.quote(java.io.File.separator)}.*".r,
+      s"examples${Pattern.quote(java.io.File.separator)}.*".r,
+      s"cypress${Pattern.quote(java.io.File.separator)}.*".r,
+      s"jest-cache${Pattern.quote(java.io.File.separator)}.*".r,
+      s"eslint-rules${Pattern.quote(java.io.File.separator)}.*".r,
+      s"codemods${Pattern.quote(java.io.File.separator)}.*".r,
+      s"flow-typed${Pattern.quote(java.io.File.separator)}.*".r,
+      s"i18n${Pattern.quote(java.io.File.separator)}.*".r,
+      s"vendor${Pattern.quote(java.io.File.separator)}.*".r,
+      s"www${Pattern.quote(java.io.File.separator)}.*".r,
+      s"dist${Pattern.quote(java.io.File.separator)}.*".r,
+      s"build${Pattern.quote(java.io.File.separator)}.*".r
+    )
 
   private val IgnoredTestsRegex: Seq[Regex] =
     List(
@@ -62,10 +88,10 @@ object AstGenRunner {
     skippedFiles: List[(String, String)] = List.empty
   )
 
-  // directory for the astgen binary from the env var ASTGEN_BIN
-  private val AstGenBinDir: Option[String] = scala.util.Properties.envOrNone("ASTGEN_BIN").flatMap {
-    case path if File(path).isDirectory => Some(path)
-    case path if File(path).exists      => File(path).parentOption.map(_.pathAsString)
+  // full path to the astgen binary from the env var ASTGEN_BIN
+  private val AstGenBin: Option[String] = scala.util.Properties.envOrNone("ASTGEN_BIN").flatMap {
+    case path if File(path).isDirectory => Some((File(path) / "astgen").pathAsString)
+    case path if File(path).exists      => Some(File(path).pathAsString)
     case _                              => None
   }
 
@@ -99,9 +125,10 @@ object AstGenRunner {
   }
 
   private def hasCompatibleAstGenVersionAtPath(astGenVersion: String, path: Option[String]): Boolean = {
-    val localPath    = path.getOrElse(".")
-    val debugMsgPath = path.getOrElse("PATH")
-    ExternalCommand.run("astgen --version", localPath).toOption.map(_.mkString.strip()) match {
+    val astGenCommand = path.getOrElse("astgen")
+    val localPath     = path.flatMap(File(_).parentOption.map(_.pathAsString)).getOrElse(".")
+    val debugMsgPath  = path.getOrElse("PATH")
+    ExternalCommand.run(s"$astGenCommand --version", localPath).toOption.map(_.mkString.strip()) match {
       case Some(installedVersion)
           if installedVersion != "unknown" && Try(VersionHelper.compare(installedVersion, astGenVersion)).toOption
             .getOrElse(-1) >= 0 =>
@@ -121,10 +148,10 @@ object AstGenRunner {
     *   the full path to the astgen binary found on the system
     */
   private def compatibleAstGenPath(astGenVersion: String): String = {
-    AstGenBinDir match
+    AstGenBin match
       // 1. case: we try it at env var ASTGEN_BIN
       case Some(path) if hasCompatibleAstGenVersionAtPath(astGenVersion, Some(path)) =>
-        s"$path/astgen"
+        path
       // 2. case: we try it with the systems PATH
       case _ if hasCompatibleAstGenVersionAtPath(astGenVersion, None) =>
         "astgen"
@@ -151,12 +178,17 @@ class AstGenRunner(config: Config) {
 
   private val executableArgs = if (!config.tsTypes) " --no-tsTypes" else ""
 
-  private def skippedFiles(in: File, astGenOut: List[String]): List[String] = {
+  private def skippedFiles(astGenOut: List[String]): List[String] = {
     val skipped = astGenOut.collect {
+      case out if out.startsWith("Parsing") =>
+        val filename = out.substring(out.indexOf(" ") + 1, out.indexOf(":") - 1)
+        val reason   = out.substring(out.indexOf(":") + 2)
+        logger.warn(s"\t- failed to parse '$filename': '$reason'")
+        Option(filename)
       case out if !out.startsWith("Converted") && !out.startsWith("Retrieving") =>
         val filename = out.substring(0, out.indexOf(" "))
         val reason   = out.substring(out.indexOf(" ") + 1)
-        logger.warn(s"\t- failed to parse '${in / filename}': '$reason'")
+        logger.warn(s"\t- failed to parse '$filename': '$reason'")
         Option(filename)
       case out =>
         logger.debug(s"\t+ $out")
@@ -265,7 +297,8 @@ class AstGenRunner(config: Config) {
       }
     }
 
-    val result = ExternalCommand.run(s"$astGenCommand$executableArgs -t ts -o $out", out.toString())
+    val result =
+      ExternalCommand.run(s"$astGenCommand$executableArgs -t ts -o $out", out.toString(), extraEnv = NODE_OPTIONS)
 
     val jsons = SourceFiles.determine(out.toString(), Set(".json"))
     jsons.foreach { jsonPath =>
@@ -292,12 +325,12 @@ class AstGenRunner(config: Config) {
   private def vueFiles(in: File, out: File): Try[Seq[String]] = {
     val files = SourceFiles.determine(in.pathAsString, Set(".vue"))
     if (files.nonEmpty)
-      ExternalCommand.run(s"$astGenCommand$executableArgs -t vue -o $out", in.toString())
+      ExternalCommand.run(s"$astGenCommand$executableArgs -t vue -o $out", in.toString(), extraEnv = NODE_OPTIONS)
     else Success(Seq.empty)
   }
 
   private def jsFiles(in: File, out: File): Try[Seq[String]] =
-    ExternalCommand.run(s"$astGenCommand$executableArgs -t ts -o $out", in.toString())
+    ExternalCommand.run(s"$astGenCommand$executableArgs -t ts -o $out", in.toString(), extraEnv = NODE_OPTIONS)
 
   private def runAstGenNative(in: File, out: File): Try[Seq[String]] = for {
     ejsResult <- ejsFiles(in, out)
@@ -305,13 +338,27 @@ class AstGenRunner(config: Config) {
     jsResult  <- jsFiles(in, out)
   } yield jsResult ++ vueResult ++ ejsResult
 
+  private def checkParsedFiles(files: List[String], in: File): List[String] = {
+    val numOfParsedFiles = files.size
+    logger.info(s"Parsed $numOfParsedFiles files.")
+    if (numOfParsedFiles == 0) {
+      logger.warn("You may want to check the DEBUG logs for a list of files that are ignored by default.")
+      SourceFiles.determine(
+        in.pathAsString,
+        Set(".js", ".ts", ".vue", ".ejs", ".jsx", ".cjs", ".mjs", ".tsx"),
+        ignoredDefaultRegex = Option(AstGenDefaultIgnoreRegex)
+      )
+    }
+    files
+  }
+
   def execute(out: File): AstGenRunnerResult = {
     val in = File(config.inputPath)
     logger.info(s"Running astgen in '$in' ...")
     runAstGenNative(in, out) match {
       case Success(result) =>
-        val parsed  = filterFiles(SourceFiles.determine(out.toString(), Set(".json")), out)
-        val skipped = skippedFiles(in, result.toList)
+        val parsed  = checkParsedFiles(filterFiles(SourceFiles.determine(out.toString(), Set(".json")), out), in)
+        val skipped = skippedFiles(result.toList)
         AstGenRunnerResult(parsed.map((in.toString(), _)), skipped.map((in.toString(), _)))
       case Failure(f) =>
         logger.error("\t- running astgen failed!", f)

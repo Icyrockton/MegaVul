@@ -31,28 +31,16 @@ class ExtendedCfgNode(val traversal: Iterator[CfgNode]) extends AnyVal {
   def reachableBy[NodeType](sourceTrav: IterableOnce[NodeType], sourceTravs: IterableOnce[NodeType]*)(implicit
     context: EngineContext
   ): Iterator[NodeType] = {
-    val sources = sourceTravsToStartingPoints(sourceTrav +: sourceTravs: _*)
+    val sources = sourceTravsToStartingPoints(sourceTrav +: sourceTravs*)
     val reachedSources =
       reachableByInternal(sources).map(_.path.head.node)
     reachedSources.cast[NodeType]
   }
 
-  /** Trims out path elements that represent module-level variable assignment desugaring
-    */
-  private def trimModuleVariableDesugarBlock(path: Vector[PathElement]): Vector[PathElement] = {
-    val moduleKeywords = Seq("<module>", ":program")
-    val codeMatcher    = s"(${moduleKeywords.mkString("|")}).*"
-    path.filterNot { x =>
-      x.node match
-        case block: Block => block.astChildren.code(codeMatcher).nonEmpty
-        case astNode      => astNode.inAssignment.code(codeMatcher).nonEmpty
-    }
-  }
-
   def reachableByFlows[A](sourceTrav: IterableOnce[A], sourceTravs: IterableOnce[A]*)(implicit
     context: EngineContext
   ): Iterator[Path] = {
-    val sources        = sourceTravsToStartingPoints(sourceTrav +: sourceTravs: _*)
+    val sources        = sourceTravsToStartingPoints(sourceTrav +: sourceTravs*)
     val startingPoints = sources.map(_.startingPoint)
     val paths = reachableByInternal(sources).par
       .map { result =>
@@ -63,10 +51,8 @@ class ExtendedCfgNode(val traversal: Iterator[CfgNode]) extends AnyVal {
         if (first.isDefined && !first.get.visible && !startingPoints.contains(first.get.node)) {
           None
         } else {
-          val visiblePathElements       = result.path.filter(x => startingPoints.contains(x.node) || x.visible)
-          val trimmedOfModuleDesugaring = trimModuleVariableDesugarBlock(visiblePathElements)
-          val deDuplicated              = removeConsecutiveDuplicates(trimmedOfModuleDesugaring.map(_.node))
-          Some(Path(deDuplicated))
+          val visiblePathElements = result.path.filter(x => startingPoints.contains(x.node) || x.visible)
+          Some(Path(removeConsecutiveDuplicates(visiblePathElements.map(_.node))))
         }
       }
       .filter(_.isDefined)
@@ -79,7 +65,7 @@ class ExtendedCfgNode(val traversal: Iterator[CfgNode]) extends AnyVal {
   def reachableByDetailed[NodeType](sourceTrav: Iterator[NodeType], sourceTravs: Iterator[NodeType]*)(implicit
     context: EngineContext
   ): Vector[TableEntry] = {
-    val sources = SourcesToStartingPoints.sourceTravsToStartingPoints(sourceTrav +: sourceTravs: _*)
+    val sources = SourcesToStartingPoints.sourceTravsToStartingPoints(sourceTrav +: sourceTravs*)
     reachableByInternal(sources)
   }
 

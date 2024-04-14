@@ -1,6 +1,5 @@
 package io.joern.gosrc2cpg.astcreation
 
-import io.joern.gosrc2cpg.datastructures.GoGlobal
 import io.joern.gosrc2cpg.parser.ParserAst.*
 import io.joern.gosrc2cpg.parser.{ParserKeys, ParserNodeInfo}
 import io.joern.x2cpg.utils.NodeBuilders.newOperatorCallNode
@@ -17,6 +16,7 @@ trait AstForPrimitivesCreator(implicit withSchemaValidation: ValidationMode) { t
       case BasicLit     => Seq(astForLiteral(primitive))
       case CompositeLit => astForCompositeLiteral(primitive)
       case Ident        => Seq(astForIdentifier(primitive))
+      case FuncLit      => astForFuncLiteral(primitive)
       case _            => Seq(Ast())
     }
   }
@@ -71,18 +71,19 @@ trait AstForPrimitivesCreator(implicit withSchemaValidation: ValidationMode) { t
           Ast(node).withRefEdge(node, variable)
         case _ =>
           // If its not local node then check if its global member variable of package TypeDecl
-          Option(GoGlobal.structTypeMemberTypeMapping.get(s"$fullyQualifiedPackage${Defines.dot}$identifierName")) match
+          goGlobal.getStructTypeMemberType(fullyQualifiedPackage, identifierName) match {
             case Some(fieldTypeFullName) => astForPackageGlobalFieldAccess(fieldTypeFullName, identifierName, ident)
             case _                       =>
               // TODO: something is wrong here. Refer to SwitchTests -> "be correct for switch case 4"
               Ast(identifierNode(ident, identifierName, ident.json(ParserKeys.Name).str, Defines.anyTypeName))
+          }
       }
     } else {
       Ast()
     }
   }
 
-  private def astForPackageGlobalFieldAccess(
+  protected def astForPackageGlobalFieldAccess(
     fieldTypeFullName: String,
     identifierName: String,
     ident: ParserNodeInfo

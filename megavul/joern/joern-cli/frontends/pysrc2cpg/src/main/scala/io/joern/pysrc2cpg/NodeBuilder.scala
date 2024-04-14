@@ -1,6 +1,7 @@
 package io.joern.pysrc2cpg
 
-import io.joern.pysrc2cpg.PythonAstVisitor.{allBuiltinClasses, builtinPrefix, typingClassesV3, typingPrefix}
+import io.joern.pysrc2cpg.PythonAstVisitor.{allBuiltinClasses, typingClassesV3, typingPrefix}
+import io.joern.pysrc2cpg.Constants.builtinPrefix
 import io.joern.pythonparser.ast
 import io.joern.x2cpg.Defines
 import io.joern.x2cpg.utils.NodeBuilders
@@ -52,6 +53,9 @@ class NodeBuilder(diffGraph: DiffGraphBuilder) {
       .inheritsFromTypeFullName(inheritsFromFullNames)
       .lineNumber(lineAndColumn.line)
       .columnNumber(lineAndColumn.column)
+      .offset(lineAndColumn.offset)
+      .offsetEnd(lineAndColumn.endOffset)
+
     addNodeToDiff(typeDeclNode)
   }
 
@@ -105,6 +109,8 @@ class NodeBuilder(diffGraph: DiffGraphBuilder) {
       .lineNumberEnd(lineAndColumn.endLine)
       .columnNumber(lineAndColumn.column)
       .columnNumberEnd(lineAndColumn.endColumn)
+      .offset(lineAndColumn.offset)
+      .offsetEnd(lineAndColumn.endOffset)
     addNodeToDiff(methodNode)
   }
 
@@ -198,16 +204,12 @@ class NodeBuilder(diffGraph: DiffGraphBuilder) {
     addNodeToDiff(returnNode)
   }
 
-  def identifierNode(
-    name: String,
-    lineAndColumn: LineAndColumn,
-    typeFullName: String = Constants.ANY
-  ): nodes.NewIdentifier = {
+  def identifierNode(name: String, lineAndColumn: LineAndColumn): nodes.NewIdentifier = {
     val identifierNode = nodes
       .NewIdentifier()
       .code(name)
       .name(name)
-      .typeFullName(typeFullName)
+      .typeFullName(Constants.ANY)
       .lineNumber(lineAndColumn.line)
       .columnNumber(lineAndColumn.column)
     addNodeToDiff(identifierNode)
@@ -223,28 +225,35 @@ class NodeBuilder(diffGraph: DiffGraphBuilder) {
     addNodeToDiff(fieldIdentifierNode)
   }
 
-  def numberLiteralNode(number: Int, lineAndColumn: LineAndColumn): nodes.NewLiteral = {
-    numberLiteralNode(number.toString, lineAndColumn)
-  }
-
-  def numberLiteralNode(number: String, lineAndColumn: LineAndColumn): nodes.NewLiteral = {
+  def literalNode(string: String, dynamicTypeHint: Option[String], lineAndColumn: LineAndColumn): nodes.NewLiteral = {
     val literalNode = nodes
       .NewLiteral()
-      .code(number)
+      .code(string)
       .typeFullName(Constants.ANY)
+      .dynamicTypeHintFullName(dynamicTypeHint.toList)
       .lineNumber(lineAndColumn.line)
       .columnNumber(lineAndColumn.column)
     addNodeToDiff(literalNode)
   }
 
   def stringLiteralNode(string: String, lineAndColumn: LineAndColumn): nodes.NewLiteral = {
-    val literalNode = nodes
-      .NewLiteral()
-      .code(string)
-      .typeFullName(Constants.ANY)
-      .lineNumber(lineAndColumn.line)
-      .columnNumber(lineAndColumn.column)
-    addNodeToDiff(literalNode)
+    literalNode(string, Some(Constants.builtinStrType), lineAndColumn)
+  }
+
+  def bytesLiteralNode(string: String, lineAndColumn: LineAndColumn): nodes.NewLiteral = {
+    literalNode(string, Some(Constants.builtinBytesType), lineAndColumn)
+  }
+
+  def intLiteralNode(string: String, lineAndColumn: LineAndColumn): nodes.NewLiteral = {
+    literalNode(string, Some(Constants.builtinIntType), lineAndColumn)
+  }
+
+  def floatLiteralNode(string: String, lineAndColumn: LineAndColumn): nodes.NewLiteral = {
+    literalNode(string, Some(Constants.builtinFloatType), lineAndColumn)
+  }
+
+  def complexLiteralNode(string: String, lineAndColumn: LineAndColumn): nodes.NewLiteral = {
+    literalNode(string, Some(Constants.builtinComplexType), lineAndColumn)
   }
 
   def blockNode(code: String, lineAndColumn: LineAndColumn): nodes.NewBlock = {
@@ -281,10 +290,12 @@ class NodeBuilder(diffGraph: DiffGraphBuilder) {
     addNodeToDiff(localNode)
   }
 
-  def fileNode(fileName: String): nodes.NewFile = {
+  def fileNode(fileName: String, content: Option[String]): nodes.NewFile = {
     val fileNode = nodes
       .NewFile()
       .name(fileName)
+
+    content.foreach(fileNode.content(_))
     addNodeToDiff(fileNode)
   }
 

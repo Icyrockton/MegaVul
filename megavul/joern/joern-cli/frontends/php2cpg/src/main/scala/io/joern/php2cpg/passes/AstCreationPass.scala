@@ -19,7 +19,14 @@ class AstCreationPass(config: Config, cpg: Cpg, parser: PhpParser)(implicit with
 
   val PhpSourceFileExtensions: Set[String] = Set(".php")
 
-  override def generateParts(): Array[String] = SourceFiles.determine(config.inputPath, PhpSourceFileExtensions).toArray
+  override def generateParts(): Array[String] = SourceFiles
+    .determine(
+      config.inputPath,
+      PhpSourceFileExtensions,
+      ignoredFilesRegex = Option(config.ignoredFilesRegex),
+      ignoredFilesPath = Option(config.ignoredFiles)
+    )
+    .toArray
 
   override def runOnPart(diffGraph: DiffGraphBuilder, filename: String): Unit = {
     val relativeFilename = if (filename == config.inputPath) {
@@ -27,9 +34,12 @@ class AstCreationPass(config: Config, cpg: Cpg, parser: PhpParser)(implicit with
     } else {
       File(config.inputPath).relativize(File(filename)).toString
     }
-    parser.parseFile(filename, config.phpIni) match {
-      case Some(parseResult) =>
-        diffGraph.absorb(new AstCreator(relativeFilename, parseResult)(config.schemaValidation).createAst())
+    parser.parseFile(filename) match {
+      case Some((parseResult, fileContent)) =>
+        diffGraph.absorb(
+          new AstCreator(relativeFilename, parseResult, fileContent, config.disableFileContent)(config.schemaValidation)
+            .createAst()
+        )
 
       case None =>
         logger.warn(s"Could not parse file $filename. Results will be missing!")

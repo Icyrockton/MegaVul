@@ -1,6 +1,6 @@
 package io.joern.rubysrc2cpg.deprecated.astcreation
 
-import io.joern.rubysrc2cpg.deprecated.parser.RubyParser.*
+import io.joern.rubysrc2cpg.deprecated.parser.DeprecatedRubyParser.*
 import io.joern.rubysrc2cpg.deprecated.passes.Defines
 import io.joern.x2cpg.utils.*
 import io.joern.x2cpg.{Ast, ValidationMode, Defines as XDefines}
@@ -37,7 +37,7 @@ trait AstForTypesCreator(implicit withSchemaValidation: ValidationMode) { this: 
         classStack.pop()
       }
 
-      val typeDecl = typeDeclNode(ctx, className, fullName, relativeFilename, text(ctx).takeWhile(_ != '\n'))
+      val typeDecl = typeDeclNode(ctx, className, fullName, relativeFilename, code(ctx).takeWhile(_ != '\n'))
 
       // create constructor if not explicitly defined
       val hasConstructor =

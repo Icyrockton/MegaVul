@@ -5,7 +5,7 @@ import io.shiftleft.codepropertygraph.Cpg
 import io.shiftleft.codepropertygraph.generated.nodes._
 import io.shiftleft.codepropertygraph.generated.{EdgeTypes, PropertyNames}
 import io.shiftleft.passes.ForkJoinParallelCpgPass
-import io.shiftleft.semanticcpg.language._
+import io.shiftleft.semanticcpg.language.*
 
 import java.io.File
 import java.nio.file.Paths
@@ -33,7 +33,7 @@ abstract class XInheritanceFullNamePass(cpg: Cpg) extends ForkJoinParallelCpgPas
     if (resolvedTypeDecls.nonEmpty) {
       val fullNames = resolvedTypeDecls.map(_.fullName)
       builder.setNodeProperty(source, PropertyNames.INHERITS_FROM_TYPE_FULL_NAME, fullNames)
-      cpg.typ.fullNameExact(fullNames: _*).foreach(tgt => builder.addEdge(source, tgt, EdgeTypes.INHERITS_FROM))
+      cpg.typ.fullNameExact(fullNames*).foreach(tgt => builder.addEdge(source, tgt, EdgeTypes.INHERITS_FROM))
     }
   }
 
@@ -57,7 +57,9 @@ abstract class XInheritanceFullNamePass(cpg: Cpg) extends ForkJoinParallelCpgPas
   }
 
   protected def resolveInheritedTypeFullName(td: TypeDecl, builder: DiffGraphBuilder): Seq[TypeDeclBase] = {
-    val qualifiedNamesInScope = td.file.ast
+    val callsOfInterest     = td.file.method.flatMap(_._callViaContainsOut)
+    val typeDeclsOfInterest = td.file.typeDecl
+    val qualifiedNamesInScope = (callsOfInterest ++ typeDeclsOfInterest)
       .flatMap(extractTypeDeclFromNode)
       .filterNot(_.endsWith(moduleName))
       .l
@@ -67,7 +69,7 @@ abstract class XInheritanceFullNamePass(cpg: Cpg) extends ForkJoinParallelCpgPas
         splitName.last
       case x => x
     }.distinct
-    val validTypeDecls = cpg.typeDecl.nameExact(matchersInScope: _*).toList
+    val validTypeDecls = cpg.typeDecl.nameExact(matchersInScope*).toList
     val filteredTypes  = validTypeDecls.filter(vt => td.inheritsFromTypeFullName.contains(vt.name))
     if (filteredTypes.isEmpty) {
       // Usually in the case of inheriting external types

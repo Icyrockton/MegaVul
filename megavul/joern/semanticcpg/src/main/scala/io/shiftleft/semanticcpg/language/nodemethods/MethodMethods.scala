@@ -64,4 +64,13 @@ class MethodMethods(val method: Method) extends AnyVal with NodeExtension with H
   override def location: NewLocation = {
     LocationCreator(method, method.name, method.label, method.lineNumber, method)
   }
+
+  def content: Option[String] = {
+    for {
+      content <- method.file.content.headOption
+      if content != File.PropertyDefaults.Content
+      offset    <- method.offset
+      offsetEnd <- method.offsetEnd
+    } yield content.slice(offset, offsetEnd)
+  }
 }

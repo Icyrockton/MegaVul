@@ -40,20 +40,17 @@ class AstCreationPass(config: Config, cpg: Cpg, sourcesOverride: Option[List[Str
   val global: Global = new Global()
   private val logger = LoggerFactory.getLogger(classOf[AstCreationPass])
 
-  private val sourceFilenames = SourceParser.getSourceFilenames(config, sourcesOverride)
+  val (sourceParser, symbolSolver) = initParserAndUtils(config)
 
-  val (sourceParser, symbolSolver) = initParserAndUtils(config, sourceFilenames)
-
-  override def generateParts(): Array[String] = sourceFilenames
+  override def generateParts(): Array[String] = sourceParser.relativeFilenames.toArray
 
   override def runOnPart(diffGraph: DiffGraphBuilder, filename: String): Unit = {
-    val relativeFilename = Path.of(config.inputPath).relativize(Path.of(filename)).toString
-    sourceParser.parseAnalysisFile(relativeFilename, !config.disableFileContent) match {
+    sourceParser.parseAnalysisFile(filename, !config.disableFileContent) match {
       case Some(compilationUnit, fileContent) =>
         symbolSolver.inject(compilationUnit)
         val contentToUse = if (!config.disableFileContent) fileContent else None
         diffGraph.absorb(
-          new AstCreator(relativeFilename, compilationUnit, contentToUse, global, symbolSolver)(config.schemaValidation)
+          new AstCreator(filename, compilationUnit, contentToUse, global, symbolSolver)(config.schemaValidation)
             .createAst()
         )
 
@@ -61,15 +58,27 @@ class AstCreationPass(config: Config, cpg: Cpg, sourcesOverride: Option[List[Str
     }
   }
 
-  private def initParserAndUtils(config: Config, sourceFilenames: Array[String]): (SourceParser, JavaSymbolSolver) = {
+  private def initParserAndUtils(config: Config): (SourceParser, JavaSymbolSolver) = {
     val dependencies = getDependencyList(config.inputPath)
-    val sourceParser = SourceParser(config, dependencies.exists(_.contains("lombok")))
-    val symbolSolver = createSymbolSolver(config, dependencies, sourceParser, sourceFilenames)
+    val sourceParser = SourceParser(config, sourcesOverride)
+    val symbolSolver = createSymbolSolver(config, dependencies, sourceParser)
     (sourceParser, symbolSolver)
   }
 
   private def getDependencyList(inputPath: String): List[String] = {
-    if (config.fetchDependencies) {
+    val envVarValue = Option(System.getenv(JavaSrcEnvVar.FetchDependencies.name))
+    val shouldFetch = if (envVarValue.exists(_.nonEmpty)) {
+      logger.info(s"Enabling dependency fetching: Environment variable ${JavaSrcEnvVar.FetchDependencies.name} is set")
+      true
+    } else if (config.fetchDependencies) {
+      logger.info(s"Enabling dependency fetching: --fetch-dependencies flag was set")
+      true
+    } else {
+      logger.info("dependency resolving not enabled")
+      false
+    }
+
+    if (shouldFetch) {
       DependencyResolver.getDependencies(Paths.get(inputPath)) match {
         case Some(deps) => deps.toList
         case None =>
@@ -77,7 +86,6 @@ class AstCreationPass(config: Config, cpg: Cpg, sourcesOverride: Option[List[Str
           List()
       }
     } else {
-      logger.info("dependency resolving disabled")
       List()
     }
   }
@@ -85,8 +93,7 @@ class AstCreationPass(config: Config, cpg: Cpg, sourcesOverride: Option[List[Str
   private def createSymbolSolver(
     config: Config,
     dependencies: List[String],
-    sourceParser: SourceParser,
-    sourceFilenames: Array[String]
+    sourceParser: SourceParser
   ): JavaSymbolSolver = {
     val combinedTypeSolver = new SimpleCombinedTypeSolver()
     val symbolSolver       = new JavaSymbolSolver(combinedTypeSolver)
@@ -109,18 +116,24 @@ class AstCreationPass(config: Config, cpg: Cpg, sourcesOverride: Option[List[Str
         jdkPath
     }
 
-    combinedTypeSolver.addNonCachingTypeSolver(JdkJarTypeSolver.fromJdkPath(jdkPath))
-
-    val relativeSourceFilenames =
-      sourceFilenames.map(filename => Path.of(config.inputPath).relativize(Path.of(filename)).toString)
+    combinedTypeSolver.addNonCachingTypeSolver(
+      JdkJarTypeSolver.fromJdkPath(jdkPath, useCache = config.cacheJdkTypeSolver)
+    )
 
     val sourceTypeSolver =
-      EagerSourceTypeSolver(relativeSourceFilenames, sourceParser, combinedTypeSolver, symbolSolver)
+      EagerSourceTypeSolver(sourceParser, combinedTypeSolver, symbolSolver)
 
     combinedTypeSolver.addCachingTypeSolver(sourceTypeSolver)
 
     // Add solvers for inference jars
     val jarsList = config.inferenceJarPaths.flatMap(recursiveJarsFromPath).toList
+    if (config.inferenceJarPaths.isEmpty) {
+      logger.debug("No inference jar paths given")
+    } else if (jarsList.isEmpty) {
+      logger.warn(s"Could not find any inference jars at provided paths: ${config.inferenceJarPaths.mkString(",")}")
+    } else {
+      logger.debug(s"Using inference jars: ${jarsList.mkString(":")}")
+    }
     (jarsList ++ dependencies)
       .flatMap { path =>
         Try(new JarTypeSolver(path)).toOption

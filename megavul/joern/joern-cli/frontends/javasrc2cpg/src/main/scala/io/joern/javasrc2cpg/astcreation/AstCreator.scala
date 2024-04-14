@@ -14,14 +14,17 @@ import com.github.javaparser.ast.expr.{
   TextBlockLiteralExpr
 }
 import com.github.javaparser.ast.nodeTypes.{NodeWithName, NodeWithSimpleName}
-import com.github.javaparser.ast.{CompilationUnit, Node, PackageDeclaration}
+import com.github.javaparser.ast.{CompilationUnit, ImportDeclaration, Node, PackageDeclaration}
 import com.github.javaparser.resolution.UnsolvedSymbolException
-import com.github.javaparser.resolution.declarations.{ResolvedMethodLikeDeclaration, ResolvedReferenceTypeDeclaration}
+import com.github.javaparser.resolution.declarations.{
+  ResolvedMethodDeclaration,
+  ResolvedMethodLikeDeclaration,
+  ResolvedReferenceTypeDeclaration
+}
 import com.github.javaparser.resolution.types.ResolvedType
 import com.github.javaparser.resolution.types.parametrization.ResolvedTypeParametersMap
 import com.github.javaparser.symbolsolver.JavaSymbolSolver
 import io.joern.javasrc2cpg.astcreation.declarations.AstForDeclarationsCreator
-import io.joern.javasrc2cpg.astcreation.expressions.AstForCallExpressionsCreator.PartialConstructor
 import io.joern.javasrc2cpg.astcreation.expressions.AstForExpressionsCreator
 import io.joern.javasrc2cpg.astcreation.statements.AstForStatementsCreator
 import io.joern.javasrc2cpg.scope.Scope
@@ -29,7 +32,17 @@ import io.joern.javasrc2cpg.scope.Scope.*
 import io.joern.javasrc2cpg.typesolvers.TypeInfoCalculator
 import io.joern.javasrc2cpg.typesolvers.TypeInfoCalculator.TypeConstants
 import io.joern.javasrc2cpg.util.BindingTable.createBindingTable
-import io.joern.javasrc2cpg.util.{BindingTable, BindingTableAdapterForJavaparser, NameConstants}
+import io.joern.javasrc2cpg.util.MultiBindingTableAdapterForJavaparser.{
+  InnerClassDeclaration,
+  JavaparserBindingDeclType,
+  RegularClassDeclaration
+}
+import io.joern.javasrc2cpg.util.{
+  BindingTable,
+  BindingTableAdapterForJavaparser,
+  MultiBindingTableAdapterForJavaparser,
+  NameConstants
+}
 import io.joern.x2cpg.datastructures.Global
 import io.joern.x2cpg.utils.OffsetUtils
 import io.joern.x2cpg.{Ast, AstCreatorBase, AstNodeBuilder, ValidationMode}
@@ -84,9 +97,7 @@ class AstCreator(
   private[astcreation] val scope = Scope()
 
   private[astcreation] val typeInfoCalc: TypeInfoCalculator = TypeInfoCalculator(global, symbolSolver)
-  // TODO Move to scope or get rid of it.
-  private[astcreation] val partialConstructorQueue: mutable.ArrayBuffer[PartialConstructor] = mutable.ArrayBuffer.empty
-  private[astcreation] val bindingTableCache = mutable.HashMap.empty[String, BindingTable]
+  private[astcreation] val bindingTableCache                = mutable.HashMap.empty[String, BindingTable]
 
   /** Entry point of AST creation. Translates a compilation unit created by JavaParser into a DiffGraph containing the
     * corresponding CPG AST.
@@ -102,7 +113,7 @@ class AstCreator(
 
   /** Copy nodes/edges of given `AST` into the diff graph
     */
-  private def storeInDiffGraph(ast: Ast): Unit = {
+  def storeInDiffGraph(ast: Ast): Unit = {
     Ast.storeInDiffGraph(ast, diffGraph)
   }
 
@@ -116,6 +127,7 @@ class AstCreator(
   protected def column(node: Node): Option[Integer]    = node.getBegin.map(x => Integer.valueOf(x.column)).toScala
   protected def lineEnd(node: Node): Option[Integer]   = node.getEnd.map(x => Integer.valueOf(x.line)).toScala
   protected def columnEnd(node: Node): Option[Integer] = node.getEnd.map(x => Integer.valueOf(x.column)).toScala
+  protected def code(node: Node): String               = "" // TODO: javasrc2cpg uses custom code strings everywhere
 
   private val lineOffsetTable = OffsetUtils.getLineOffsetTable(fileContent)
 
@@ -138,6 +150,10 @@ class AstCreator(
       .flatten
   }
 
+  private def getImportCode(importDeclaration: ImportDeclaration): String = {
+    importDeclaration.toString.trim.stripSuffix(";")
+  }
+
   // TODO: Handle static imports correctly.
   private def addImportsToScope(compilationUnit: CompilationUnit): Seq[NewImport] = {
     val (asteriskImports, specificImports) = compilationUnit.getImports.asScala.toList.partition(_.isAsterisk)
@@ -148,11 +164,10 @@ class AstCreator(
       val importNode = NewImport()
         .importedAs(name)
         .importedEntity(typeFullName)
+        .code(getImportCode(importStmt))
 
-      if (importStmt.isStatic()) {
-        scope.addStaticImport(importNode)
-      } else {
-        scope.addType(name, typeFullName)
+      if (!importStmt.isStatic) {
+        scope.addTopLevelType(name, typeFullName)
       }
       importNode
     }
@@ -165,6 +180,7 @@ class AstCreator(
           .importedAs(name)
           .importedEntity(typeFullName)
           .isWildcard(true)
+          .code(getImportCode(imp))
         scope.addWildcardImport(typeFullName)
         Seq(importNode)
       case _ => // Only try to guess a wildcard import if exactly one is defined
@@ -184,19 +200,18 @@ class AstCreator(
       val importNodes = addImportsToScope(compilationUnit).map(Ast(_))
 
       val typeDeclAsts = compilationUnit.getTypes.asScala.map { typ =>
-        astForTypeDecl(typ, astParentType = NodeTypes.NAMESPACE_BLOCK, astParentFullName = namespaceBlock.fullName)
+        astForTypeDeclaration(typ)
       }
 
       // TODO: Add ASTs
-      scope.popScope()
+      scope.popNamespaceScope()
       Ast(namespaceBlock).withChildren(typeDeclAsts).withChildren(importNodes)
     } catch {
       case t: UnsolvedSymbolException =>
         logger.error(s"Unsolved symbol exception caught in $filename")
         Ast()
       case t: Throwable =>
-        logger.error(s"Parsing file $filename failed with $t")
-        logger.error(s"Caused by ${t.getCause}")
+        logger.error(s"Parsing file $filename failed", t)
         Ast()
     }
   }
@@ -229,20 +244,36 @@ class AstCreator(
     }
   }
 
-  def getBindingTable(typeDecl: ResolvedReferenceTypeDeclaration): BindingTable = {
-    val fullName = typeInfoCalc.fullName(typeDecl).getOrElse {
+  private def fullNameForBindingTable(typeDecl: ResolvedReferenceTypeDeclaration): String = {
+    typeInfoCalc.fullNameWithoutRegistering(typeDecl).getOrElse {
       val qualifiedName = typeDecl.getQualifiedName
       logger.warn(s"Could not get full name for resolved type decl $qualifiedName. THIS SHOULD NOT HAPPEN!")
       qualifiedName
     }
+  }
+
+  def getMultiBindingTable(typeDecl: JavaparserBindingDeclType): BindingTable = {
+    val fullName = typeDecl match {
+      case RegularClassDeclaration(resolvedRefType, _) => fullNameForBindingTable(resolvedRefType)
+
+      case innerClassDeclaration: InnerClassDeclaration => innerClassDeclaration.fullName
+    }
     bindingTableCache.getOrElseUpdate(
       fullName,
-      createBindingTable(fullName, typeDecl, getBindingTable, new BindingTableAdapterForJavaparser(methodSignature))
+      createBindingTable(
+        fullName,
+        typeDecl,
+        getMultiBindingTable,
+        new MultiBindingTableAdapterForJavaparser(methodSignature)
+      )
     )
   }
 
-  def expressionReturnTypeFullName(expr: Expression): Option[String] = {
+  def getBindingTable(typeDecl: ResolvedReferenceTypeDeclaration): BindingTable = {
+    getMultiBindingTable(RegularClassDeclaration(typeDecl, ResolvedTypeParametersMap.empty()))
+  }
 
+  def expressionReturnTypeFullName(expr: Expression): Option[String] = {
     val resolvedTypeOption = tryWithSafeStackOverflow(expr.calculateResolvedType()) match {
       case Failure(ex) =>
         ex match {
@@ -254,13 +285,13 @@ class AstCreator(
               case callExpr: MethodCallExpr =>
                 callExpr.getScope.toScala match {
                   case Some(_: Expression) => None
-                  case _                   => scope.lookupType(symbolException.getName)
+                  case _                   => scope.lookupType(symbolException.getName, includeWildcards = false)
                 }
               case _ => None
             }
           case _ => None
         }
-      case Success(resolvedType) => typeInfoCalc.fullName(resolvedType)
+      case Success(resolvedType) => typeInfoCalc.fullNameWithoutRegistering(resolvedType)
     }
     resolvedTypeOption.orElse(exprNameFromStack(expr))
   }

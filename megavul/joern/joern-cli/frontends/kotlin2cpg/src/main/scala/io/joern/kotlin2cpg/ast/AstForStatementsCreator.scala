@@ -3,8 +3,8 @@ package io.joern.kotlin2cpg.ast
 import io.joern.kotlin2cpg.Constants
 import io.joern.kotlin2cpg.ast.Nodes.operatorCallNode
 import io.joern.kotlin2cpg.types.{TypeConstants, TypeInfoProvider}
-import io.joern.x2cpg.{Ast, ValidationMode}
-import io.joern.x2cpg.utils.NodeBuilders.{newIdentifierNode, newLocalNode}
+import io.joern.x2cpg.{Ast, AstNodeBuilder, ValidationMode}
+import io.joern.x2cpg.utils.NodeBuilders.newIdentifierNode
 import io.shiftleft.codepropertygraph.generated.nodes.NewLocal
 import io.shiftleft.codepropertygraph.generated.{ControlStructureTypes, DispatchTypes, Operators}
 import org.jetbrains.kotlin.psi.{
@@ -22,12 +22,14 @@ import org.jetbrains.kotlin.psi.{
   KtProperty,
   KtPsiUtil,
   KtTryExpression,
+  KtWhenConditionWithExpression,
   KtWhenEntry,
   KtWhenExpression,
   KtWhileExpression
 }
 
 import scala.jdk.CollectionConverters.*
+import scala.collection.mutable
 import io.shiftleft.semanticcpg.language.*
 
 trait AstForStatementsCreator(implicit withSchemaValidation: ValidationMode) {
@@ -61,7 +63,7 @@ trait AstForStatementsCreator(implicit withSchemaValidation: ValidationMode) {
   private def astForForWithDestructuringLHS(expr: KtForExpression)(implicit typeInfoProvider: TypeInfoProvider): Ast = {
     val loopRangeText         = expr.getLoopRange.getText
     val iteratorName          = s"${Constants.iteratorPrefix}${iteratorKeyPool.next()}"
-    val localForIterator      = newLocalNode(iteratorName, TypeConstants.any)
+    val localForIterator      = localNode(expr, iteratorName, iteratorName, TypeConstants.any)
     val iteratorAssignmentLhs = newIdentifierNode(iteratorName, TypeConstants.any)
     val iteratorLocalAst      = Ast(localForIterator).withRefEdge(iteratorAssignmentLhs, localForIterator)
 
@@ -117,7 +119,7 @@ trait AstForStatementsCreator(implicit withSchemaValidation: ValidationMode) {
         .toList
 
     val tmpName     = s"${Constants.tmpLocalPrefix}${tmpKeyPool.next}"
-    val localForTmp = newLocalNode(tmpName, TypeConstants.any)
+    val localForTmp = localNode(expr, tmpName, tmpName, TypeConstants.any)
     scope.addToScope(localForTmp.name, localForTmp)
     val localForTmpAst = Ast(localForTmp)
 
@@ -180,7 +182,7 @@ trait AstForStatementsCreator(implicit withSchemaValidation: ValidationMode) {
   private def astForForWithSimpleVarLHS(expr: KtForExpression)(implicit typeInfoProvider: TypeInfoProvider): Ast = {
     val loopRangeText         = expr.getLoopRange.getText
     val iteratorName          = s"${Constants.iteratorPrefix}${iteratorKeyPool.next()}"
-    val iteratorLocal         = newLocalNode(iteratorName, TypeConstants.any)
+    val iteratorLocal         = localNode(expr, iteratorName, iteratorName, TypeConstants.any)
     val iteratorAssignmentLhs = newIdentifierNode(iteratorName, TypeConstants.any)
     val iteratorLocalAst      = Ast(iteratorLocal).withRefEdge(iteratorAssignmentLhs, iteratorLocal)
 
@@ -226,7 +228,7 @@ trait AstForStatementsCreator(implicit withSchemaValidation: ValidationMode) {
       typeInfoProvider.typeFullName(expr.getLoopParameter, TypeConstants.any)
     )
     val loopParameterName  = expr.getLoopParameter.getText
-    val loopParameterLocal = newLocalNode(loopParameterName, loopParameterTypeFullName)
+    val loopParameterLocal = localNode(expr, loopParameterName, loopParameterName, loopParameterTypeFullName)
     scope.addToScope(loopParameterName, loopParameterLocal)
 
     val loopParameterIdentifier = newIdentifierNode(loopParameterName, TypeConstants.any)
@@ -280,7 +282,7 @@ trait AstForStatementsCreator(implicit withSchemaValidation: ValidationMode) {
   ): Ast = {
     val conditionAst = astsForExpression(expr.getCondition, None).headOption
     val thenAsts     = astsForExpression(expr.getThen, None)
-    val elseAsts     = astsForExpression(expr.getElse, None)
+    val elseAsts     = Option(expr.getElse).toSeq.flatMap(astsForExpression(_, None))
 
     val node = controlStructureNode(expr, ControlStructureTypes.IF, expr.getText)
     controlStructureAst(node, conditionAst, List(thenAsts ++ elseAsts).flatten)
@@ -295,7 +297,7 @@ trait AstForStatementsCreator(implicit withSchemaValidation: ValidationMode) {
   )(implicit typeInfoProvider: TypeInfoProvider): Ast = {
     val conditionAsts = astsForExpression(expr.getCondition, None)
     val thenAsts      = astsForExpression(expr.getThen, None)
-    val elseAsts      = astsForExpression(expr.getElse, None)
+    val elseAsts      = Option(expr.getElse).toSeq.flatMap(astsForExpression(_, None))
 
     val allAsts = (conditionAsts ++ thenAsts ++ elseAsts).toList
     if (allAsts.nonEmpty) {
@@ -339,13 +341,21 @@ trait AstForStatementsCreator(implicit withSchemaValidation: ValidationMode) {
   def astForWhenAsStatement(expr: KtWhenExpression, argIdx: Option[Int])(implicit
     typeInfoProvider: TypeInfoProvider
   ): Ast = {
-    val astForSubject = astsForExpression(expr.getSubjectExpression, Some(1)).headOption.getOrElse(Ast())
-    val finalAstForSubject = expr.getSubjectExpression match {
-      case p: KtProperty =>
-        val block = blockNode(p, "", "").argumentIndex(1)
-        blockAst(block, List(astForSubject))
-      case _ => astForSubject
+    val (astForSubject, finalAstForSubject) = Option(expr.getSubjectExpression) match {
+      case Some(subjectExpression) =>
+        val astForSubject = astsForExpression(subjectExpression, Some(1)).headOption.getOrElse(Ast())
+        val finalAstForSubject = expr.getSubjectExpression match {
+          case p: KtProperty =>
+            val block = blockNode(p, "", "").argumentIndex(1)
+            blockAst(block, List(astForSubject))
+          case _ => astForSubject
+        }
+        (astForSubject, finalAstForSubject)
+      case _ =>
+        logger.warn(s"Subject Expression empty in this file `${relativizedPath}`.")
+        (Ast(), Ast())
     }
+
     val astsForEntries =
       withIndex(expr.getEntries.asScala.toList) { (e, idx) =>
         astsForWhenEntry(e, idx)
@@ -370,13 +380,19 @@ trait AstForStatementsCreator(implicit withSchemaValidation: ValidationMode) {
   def astForWhenAsExpression(expr: KtWhenExpression, argIdx: Option[Int], argNameMaybe: Option[String])(implicit
     typeInfoProvider: TypeInfoProvider
   ): Ast = {
+
     val callNode =
       withArgumentIndex(operatorCallNode("<operator>.when", "<operator>.when", None), argIdx)
         .argumentName(argNameMaybe)
 
-    val subjectExpressionAsts = astsForExpression(expr.getSubjectExpression, None)
-    val subjectBlock          = blockNode(expr.getSubjectExpression, "", "")
-    val subjectBlockAst       = blockAst(subjectBlock, subjectExpressionAsts.toList)
+    val subjectExpressionAsts = Option(expr.getSubjectExpression) match {
+      case Some(subjectExpression) => astsForExpression(subjectExpression, None)
+      case _ =>
+        logger.warn(s"Subject Expression empty in this file `${relativizedPath}`.")
+        Seq.empty
+    }
+    val subjectBlock    = blockNode(expr.getSubjectExpression, "", "")
+    val subjectBlockAst = blockAst(subjectBlock, subjectExpressionAsts.toList)
 
     val argAsts = expr.getEntries.asScala.toList.map { e =>
       val block = blockNode(e, "", "")
@@ -393,6 +409,38 @@ trait AstForStatementsCreator(implicit withSchemaValidation: ValidationMode) {
     callAst(callNode, List(subjectBlockAst) ++ argAsts)
   }
 
+  private def astForNoArgWhen(expr: KtWhenExpression)(implicit typeInfoProvider: TypeInfoProvider): Ast = {
+    assert(expr.getSubjectExpression == null)
+
+    val typeFullName = registerType(typeInfoProvider.expressionType(expr, TypeConstants.any))
+    var elseAst: Ast = Ast() // Initialize this as `Ast()` instead of `null`, as there is no guarantee of else block
+
+    // In reverse order than expr.getEntries since that is the order
+    // we need for nested Operators.conditional construction.
+    expr.getEntries.asScala.reverse.foreach { entry =>
+      entry.getConditions.headOption match {
+        // The other KtWhenCondition implementations are not generated
+        // we have smoke tests for those.
+        case Some(cond: KtWhenConditionWithExpression) =>
+          val condAst = astsForExpression(cond.getExpression, None).head
+
+          val entryExpr    = entry.getExpression
+          val entryExprAst = astsForExpression(entryExpr, None).head
+
+          val callNode =
+            operatorCallNode(Operators.conditional, Operators.conditional, Some(typeFullName), line(cond), column(cond))
+
+          val newElseAst = callAst(callNode, Seq(condAst, entryExprAst, elseAst))
+          elseAst = newElseAst
+        case None =>
+          // This is the 'else' branch of 'when'.
+          // and thus first in reverse order, if exists
+          elseAst = astsForExpression(entry.getExpression, None).head
+      }
+    }
+    elseAst
+  }
+
   def astForWhen(
     expr: KtWhenExpression,
     argIdx: Option[Int],
@@ -400,9 +448,13 @@ trait AstForStatementsCreator(implicit withSchemaValidation: ValidationMode) {
     annotations: Seq[KtAnnotationEntry] = Seq()
   )(implicit typeInfoProvider: TypeInfoProvider): Ast = {
     val outAst =
-      typeInfoProvider.usedAsExpression(expr) match {
-        case Some(true) => astForWhenAsExpression(expr, argIdx, argNameMaybe)
-        case _          => astForWhenAsStatement(expr, argIdx)
+      if (expr.getSubjectExpression != null) {
+        typeInfoProvider.usedAsExpression(expr) match {
+          case Some(true) => astForWhenAsExpression(expr, argIdx, argNameMaybe)
+          case _          => astForWhenAsStatement(expr, argIdx)
+        }
+      } else {
+        astForNoArgWhen(expr)
       }
     outAst.withChildren(annotations.map(astForAnnotationEntry))
   }
@@ -509,10 +561,19 @@ trait AstForStatementsCreator(implicit withSchemaValidation: ValidationMode) {
       if (implicitReturnAroundLastStatement && statements.nonEmpty) {
         val _returnNode          = returnNode(statements.last, Constants.retCode)
         val astsForLastStatement = astsForExpression(statements.last, Some(1))
-        (astsForLastStatement.dropRight(1), Some(returnAst(_returnNode, Seq(astsForLastStatement.last))))
+        if (astsForLastStatement.isEmpty)
+          (Seq(), None)
+        else
+          (
+            astsForLastStatement.dropRight(1),
+            Some(returnAst(_returnNode, Seq(astsForLastStatement.lastOption.getOrElse(Ast()))))
+          )
       } else if (statements.nonEmpty) {
         val astsForLastStatement = astsForExpression(statements.last, None)
-        (astsForLastStatement.dropRight(1), Some(astsForLastStatement.last))
+        if (astsForLastStatement.isEmpty)
+          (Seq(), None)
+        else
+          (astsForLastStatement.dropRight(1), Some(astsForLastStatement.lastOption.getOrElse(Ast())))
       } else (Seq(), None)
 
     if (pushToScope) scope.popScope()

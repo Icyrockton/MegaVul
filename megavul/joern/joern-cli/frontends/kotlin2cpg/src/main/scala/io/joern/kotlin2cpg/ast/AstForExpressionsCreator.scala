@@ -3,28 +3,11 @@ package io.joern.kotlin2cpg.ast
 import io.joern.kotlin2cpg.Constants
 import io.joern.kotlin2cpg.ast.Nodes.operatorCallNode
 import io.joern.kotlin2cpg.types.{CallKinds, TypeConstants, TypeInfoProvider}
-import io.joern.x2cpg.utils.NodeBuilders.newLocalNode
 import io.joern.x2cpg.{Ast, Defines, ValidationMode}
+import io.shiftleft.codepropertygraph.generated.nodes.NewMethodRef
 import io.shiftleft.codepropertygraph.generated.{DispatchTypes, Operators}
 import org.jetbrains.kotlin.lexer.{KtToken, KtTokens}
-import io.shiftleft.codepropertygraph.generated.nodes.{NewMethodRef}
-import org.jetbrains.kotlin.psi.{
-  KtAnnotationEntry,
-  KtArrayAccessExpression,
-  KtBinaryExpression,
-  KtBinaryExpressionWithTypeRHS,
-  KtCallExpression,
-  KtClass,
-  KtIsExpression,
-  KtNameReferenceExpression,
-  KtPostfixExpression,
-  KtPrefixExpression,
-  KtPsiUtil,
-  KtQualifiedExpression,
-  KtSuperExpression,
-  KtThisExpression
-}
-import io.shiftleft.semanticcpg.language.*
+import org.jetbrains.kotlin.psi.*
 
 import scala.jdk.CollectionConverters.*
 
@@ -80,7 +63,7 @@ trait AstForExpressionsCreator(implicit withSchemaValidation: ValidationMode) {
         }
       case _ =>
         logger.warn(
-          s"Unhandled operator token type `${opRef.getOperationSignTokenType}` for expression `${expr.getText}`."
+          s"Unhandled operator token type `${opRef.getOperationSignTokenType}` for expression `${expr.getText}` in this file `${relativizedPath}`."
         )
         Some(Constants.unknownOperator)
     }
@@ -110,7 +93,13 @@ trait AstForExpressionsCreator(implicit withSchemaValidation: ValidationMode) {
     val lhsArgs = astsForExpression(expr.getLeft, None)
     val rhsArgs = astsForExpression(expr.getRight, None)
     lhsArgs.dropRight(1) ++ rhsArgs.dropRight(1) ++ Seq(
-      callAst(withArgumentIndex(node, argIdx).argumentName(argNameMaybe), List(lhsArgs.last, rhsArgs.last))
+      callAst(
+        withArgumentIndex(node, argIdx).argumentName(argNameMaybe),
+        List(
+          lhsArgs.lastOption.getOrElse(Ast(unknownNode(expr.getLeft, Constants.empty))),
+          rhsArgs.lastOption.getOrElse(Ast(unknownNode(expr.getRight, Constants.empty)))
+        )
+      )
         .withChildren(annotations.map(astForAnnotationEntry))
     )
   }
@@ -120,8 +109,9 @@ trait AstForExpressionsCreator(implicit withSchemaValidation: ValidationMode) {
     argIdx: Option[Int],
     argNameMaybe: Option[String]
   )(implicit typeInfoProvider: TypeInfoProvider): Ast = {
-    val receiverAst = astsForExpression(expr.getReceiverExpression, Some(1)).head
-    val argAsts     = selectorExpressionArgAsts(expr)
+    val receiverAst = astsForExpression(expr.getReceiverExpression, Some(1)).headOption
+      .getOrElse(Ast(unknownNode(expr.getReceiverExpression, Constants.empty)))
+    val argAsts = selectorExpressionArgAsts(expr)
     registerType(typeInfoProvider.containingDeclType(expr, TypeConstants.any))
     val retType = registerType(typeInfoProvider.expressionType(expr, TypeConstants.any))
     val node = withArgumentIndex(
@@ -136,8 +126,9 @@ trait AstForExpressionsCreator(implicit withSchemaValidation: ValidationMode) {
     argIdx: Option[Int],
     argNameMaybe: Option[String]
   )(implicit typeInfoProvider: TypeInfoProvider): Ast = {
-    val receiverAst = astsForExpression(expr.getReceiverExpression, Some(0)).head
-    val argAsts     = selectorExpressionArgAsts(expr)
+    val receiverAst = astsForExpression(expr.getReceiverExpression, Some(0)).headOption
+      .getOrElse(Ast(unknownNode(expr.getReceiverExpression, Constants.empty)))
+    val argAsts = selectorExpressionArgAsts(expr)
 
     val (astDerivedMethodFullName, astDerivedSignature) = astDerivedFullNameWithSignature(expr, argAsts)
     val (fullName, signature) =
@@ -166,8 +157,9 @@ trait AstForExpressionsCreator(implicit withSchemaValidation: ValidationMode) {
     argIdx: Option[Int],
     argNameMaybe: Option[String]
   )(implicit typeInfoProvider: TypeInfoProvider): Ast = {
-    val receiverAst = astsForExpression(expr.getReceiverExpression, Some(0)).head
-    val argAsts     = selectorExpressionArgAsts(expr)
+    val receiverAst = astsForExpression(expr.getReceiverExpression, Some(0)).headOption
+      .getOrElse(Ast(unknownNode(expr.getReceiverExpression, Constants.empty)))
+    val argAsts = selectorExpressionArgAsts(expr)
 
     val (astDerivedMethodFullName, astDerivedSignature) = astDerivedFullNameWithSignature(expr, argAsts)
     val (fullName, signature) =
@@ -263,8 +255,9 @@ trait AstForExpressionsCreator(implicit withSchemaValidation: ValidationMode) {
     argIdx: Option[Int],
     argNameMaybe: Option[String]
   )(implicit typeInfoProvider: TypeInfoProvider): Ast = {
-    val receiverAst = astsForExpression(expr.getReceiverExpression, Some(1)).head
-    val argAsts     = selectorExpressionArgAsts(expr)
+    val receiverAst = astsForExpression(expr.getReceiverExpression, Some(1)).headOption
+      .getOrElse(Ast(unknownNode(expr.getReceiverExpression, Constants.empty)))
+    val argAsts = selectorExpressionArgAsts(expr)
 
     val (astDerivedMethodFullName, astDerivedSignature) = astDerivedFullNameWithSignature(expr, argAsts)
     val (fullName, signature) =
@@ -300,8 +293,9 @@ trait AstForExpressionsCreator(implicit withSchemaValidation: ValidationMode) {
       if (callKind == CallKinds.DynamicCall) DispatchTypes.DYNAMIC_DISPATCH
       else DispatchTypes.STATIC_DISPATCH
 
-    val receiverAst = astsForExpression(expr.getReceiverExpression, Some(argIdxForReceiver)).head
-    val argAsts     = selectorExpressionArgAsts(expr)
+    val receiverAst = astsForExpression(expr.getReceiverExpression, Some(argIdxForReceiver)).headOption
+      .getOrElse(Ast(unknownNode(expr.getReceiverExpression, Constants.empty)))
+    val argAsts = selectorExpressionArgAsts(expr)
 
     val (astDerivedMethodFullName, astDerivedSignature) = astDerivedFullNameWithSignature(expr, argAsts)
     val (fullName, signature) =
@@ -310,10 +304,15 @@ trait AstForExpressionsCreator(implicit withSchemaValidation: ValidationMode) {
     val retType    = registerType(typeInfoProvider.expressionType(expr, TypeConstants.any))
     val methodName = expr.getSelectorExpression.getFirstChild.getText
 
-    val node = withArgumentIndex(
-      callNode(expr, expr.getText, methodName, fullName, dispatchType, Some(signature), Some(retType)),
-      argIdx
-    ).argumentName(argNameMaybe)
+    val node =
+      withArgumentIndex(
+        if (fullName.startsWith("<operator>.")) {
+          operatorCallNode(fullName, expr.getText, Option(retType), line(expr), column(expr))
+        } else {
+          callNode(expr, expr.getText, methodName, fullName, dispatchType, Some(signature), Some(retType))
+        },
+        argIdx
+      ).argumentName(argNameMaybe)
     val receiverNode =
       if (argAsts.sizeIs == 1 && argAsts.head.root.get.isInstanceOf[NewMethodRef]) argAsts.head.root.get
       else receiverAst.root.get
@@ -480,7 +479,7 @@ trait AstForExpressionsCreator(implicit withSchemaValidation: ValidationMode) {
     val typeFullName = registerType(typeInfoProvider.expressionType(expr, Defines.UnresolvedNamespace))
     val tmpBlockNode = blockNode(expr, "", typeFullName)
     val tmpName      = s"${Constants.tmpLocalPrefix}${tmpKeyPool.next}"
-    val tmpLocalNode = newLocalNode(tmpName, typeFullName)
+    val tmpLocalNode = localNode(expr, tmpName, tmpName, typeFullName)
     scope.addToScope(tmpName, tmpLocalNode)
     val tmpLocalAst = Ast(tmpLocalNode)
 
@@ -499,7 +498,7 @@ trait AstForExpressionsCreator(implicit withSchemaValidation: ValidationMode) {
       withIndex(expr.getValueArguments.asScala.toSeq) { case (arg, idx) =>
         val argNameOpt = if (arg.isNamed) Option(arg.getArgumentName.getAsName.toString) else None
         val asts       = astsForExpression(arg.getArgumentExpression, Option(idx), argNameOpt)
-        (asts.dropRight(1), asts.last)
+        (asts.dropRight(1), asts.lastOption.getOrElse(Ast(unknownNode(arg.getArgumentExpression, Constants.empty))))
       }
     val astsForTrails    = argAstsWithTrail.map(_._2)
     val astsForNonTrails = argAstsWithTrail.map(_._1).flatten

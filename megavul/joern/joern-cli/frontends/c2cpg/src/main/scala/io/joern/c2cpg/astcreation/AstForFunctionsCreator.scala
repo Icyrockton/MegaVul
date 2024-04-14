@@ -1,16 +1,17 @@
 package io.joern.c2cpg.astcreation
 
-import io.shiftleft.codepropertygraph.generated.EvaluationStrategies
-import io.shiftleft.codepropertygraph.generated.nodes.*
 import io.joern.x2cpg.{Ast, ValidationMode}
+import io.joern.x2cpg.datastructures.Stack.*
+import io.joern.x2cpg.utils.NodeBuilders.newModifierNode
+import io.shiftleft.codepropertygraph.generated.nodes.*
+import io.shiftleft.codepropertygraph.generated.{EvaluationStrategies, ModifierTypes}
+import org.apache.commons.lang3.StringUtils
 import org.eclipse.cdt.core.dom.ast.*
 import org.eclipse.cdt.core.dom.ast.cpp.ICPPASTLambdaExpression
 import org.eclipse.cdt.core.dom.ast.gnu.c.ICASTKnRFunctionDeclarator
 import org.eclipse.cdt.internal.core.dom.parser.c.{CASTFunctionDeclarator, CASTParameterDeclaration}
 import org.eclipse.cdt.internal.core.dom.parser.cpp.{CPPASTFunctionDeclarator, CPPASTParameterDeclaration}
 import org.eclipse.cdt.internal.core.model.ASTStringUtil
-import io.joern.x2cpg.datastructures.Stack.*
-import org.apache.commons.lang.StringUtils
 
 import scala.annotation.tailrec
 import scala.collection.mutable
@@ -101,10 +102,11 @@ trait AstForFunctionsCreator(implicit withSchemaValidation: ValidationMode) { th
         }
       case null => Defines.anyTypeName
     }
-    val (name, fullname) = uniqueName("lambda", "", fullName(lambdaExpression))
-    val signature        = s"$returnType $fullname ${parameterListSignature(lambdaExpression)}"
-    val code             = nodeSignature(lambdaExpression)
-    val methodNode_      = methodNode(lambdaExpression, name, code, fullname, Some(signature), filename)
+    val name        = nextClosureName()
+    val fullname    = s"${fullName(lambdaExpression)}$name"
+    val signature   = s"$returnType $fullname ${parameterListSignature(lambdaExpression)}"
+    val codeString  = code(lambdaExpression)
+    val methodNode_ = methodNode(lambdaExpression, name, codeString, fullname, Some(signature), filename)
 
     scope.pushNewScope(methodNode_)
     val parameterNodes = withIndex(parameters(lambdaExpression.getDeclarator)) { (p, i) =>
@@ -118,12 +120,13 @@ trait AstForFunctionsCreator(implicit withSchemaValidation: ValidationMode) { th
       methodNode_,
       parameterNodes.map(Ast(_)),
       astForMethodBody(Option(lambdaExpression.getBody)),
-      newMethodReturnNode(lambdaExpression, registerType(returnType))
+      newMethodReturnNode(lambdaExpression, registerType(returnType)),
+      newModifierNode(ModifierTypes.LAMBDA) :: Nil
     )
     val typeDeclAst = createFunctionTypeAndTypeDecl(lambdaExpression, methodNode_, name, fullname, signature)
     Ast.storeInDiffGraph(astForLambda.merge(typeDeclAst), diffGraph)
 
-    Ast(methodRefNode(lambdaExpression, code, fullname, methodNode_.astParentFullName))
+    Ast(methodRefNode(lambdaExpression, codeString, fullname, methodNode_.astParentFullName))
   }
 
   protected def astForFunctionDeclarator(funcDecl: IASTFunctionDeclarator): Ast = {
@@ -135,9 +138,9 @@ trait AstForFunctionsCreator(implicit withSchemaValidation: ValidationMode) { th
 
     if (seenFunctionSignatures.add(signature)) {
       val name        = shortName(funcDecl)
-      val code        = nodeSignature(funcDecl.getParent)
+      val codeString  = code(funcDecl.getParent)
       val filename    = fileName(funcDecl)
-      val methodNode_ = methodNode(funcDecl, name, code, fullname, Some(signature), filename)
+      val methodNode_ = methodNode(funcDecl, name, codeString, fullname, Some(signature), filename)
 
       scope.pushNewScope(methodNode_)
 
@@ -148,7 +151,8 @@ trait AstForFunctionsCreator(implicit withSchemaValidation: ValidationMode) { th
 
       scope.popScope()
 
-      val stubAst = methodStubAst(methodNode_, parameterNodes, newMethodReturnNode(funcDecl, registerType(returnType)))
+      val stubAst =
+        methodStubAst(methodNode_, parameterNodes.map(Ast(_)), newMethodReturnNode(funcDecl, registerType(returnType)))
       val typeDeclAst = createFunctionTypeAndTypeDecl(funcDecl, methodNode_, name, fullname, signature)
       stubAst.merge(typeDeclAst)
     } else {
@@ -167,8 +171,8 @@ trait AstForFunctionsCreator(implicit withSchemaValidation: ValidationMode) { th
       s"$returnType $fullname$templateParams ${parameterListSignature(funcDef)}"
     seenFunctionSignatures.add(signature)
 
-    val code        = nodeSignature(funcDef)
-    val methodNode_ = methodNode(funcDef, name, code, fullname, Some(signature), filename)
+    val codeString  = code(funcDef)
+    val methodNode_ = methodNode(funcDef, name, codeString, fullname, Some(signature), filename)
 
     methodAstParentStack.push(methodNode_)
     scope.pushNewScope(methodNode_)
@@ -193,18 +197,18 @@ trait AstForFunctionsCreator(implicit withSchemaValidation: ValidationMode) { th
   }
 
   private def parameterNode(parameter: IASTNode, paramIndex: Int): NewMethodParameterIn = {
-    val (name, code, tpe, variadic) = parameter match {
+    val (name, codeString, tpe, variadic) = parameter match {
       case p: CASTParameterDeclaration =>
         (
           ASTStringUtil.getSimpleName(p.getDeclarator.getName),
-          nodeSignature(p),
+          code(p),
           cleanType(typeForDeclSpecifier(p.getDeclSpecifier)),
           false
         )
       case p: CPPASTParameterDeclaration =>
         (
           ASTStringUtil.getSimpleName(p.getDeclarator.getName),
-          nodeSignature(p),
+          code(p),
           cleanType(typeForDeclSpecifier(p.getDeclSpecifier)),
           p.getDeclarator.declaresParameterPack()
         )
@@ -213,16 +217,24 @@ trait AstForFunctionsCreator(implicit withSchemaValidation: ValidationMode) { th
           s.getDeclarators.headOption
             .map(n => ASTStringUtil.getSimpleName(n.getName))
             .getOrElse(uniqueName("parameter", "", "")._1),
-          nodeSignature(s),
+          code(s),
           cleanType(typeForDeclSpecifier(s)),
           false
         )
       case other =>
-        (nodeSignature(other), nodeSignature(other), cleanType(typeForDeclSpecifier(other)), false)
+        (code(other), code(other), cleanType(typeForDeclSpecifier(other)), false)
     }
 
     val parameterNode =
-      parameterInNode(parameter, name, code, paramIndex, variadic, EvaluationStrategies.BY_VALUE, registerType(tpe))
+      parameterInNode(
+        parameter,
+        name,
+        codeString,
+        paramIndex,
+        variadic,
+        EvaluationStrategies.BY_VALUE,
+        registerType(tpe)
+      )
     scope.addToScope(name, (parameterNode, tpe))
     parameterNode
   }

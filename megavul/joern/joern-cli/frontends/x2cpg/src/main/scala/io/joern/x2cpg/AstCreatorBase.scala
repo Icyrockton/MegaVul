@@ -2,13 +2,16 @@ package io.joern.x2cpg
 
 import io.joern.x2cpg.passes.frontend.MetaDataPass
 import io.joern.x2cpg.utils.NodeBuilders.newMethodReturnNode
-import io.shiftleft.codepropertygraph.generated.nodes._
+import io.shiftleft.codepropertygraph.generated.nodes.*
 import io.shiftleft.codepropertygraph.generated.{ControlStructureTypes, ModifierTypes}
+import io.shiftleft.passes.IntervalKeyPool
 import io.shiftleft.semanticcpg.language.types.structure.NamespaceTraversal
 import overflowdb.BatchedUpdate.DiffGraphBuilder
 
 abstract class AstCreatorBase(filename: String)(implicit withSchemaValidation: ValidationMode) {
   val diffGraph: DiffGraphBuilder = new DiffGraphBuilder
+
+  private val closureKeyPool = new IntervalKeyPool(first = 0, last = Long.MaxValue)
 
   def createAst(): DiffGraphBuilder
 
@@ -78,12 +81,12 @@ abstract class AstCreatorBase(filename: String)(implicit withSchemaValidation: V
     */
   def methodStubAst(
     method: NewMethod,
-    parameters: Seq[NewMethodParameterIn],
+    parameters: Seq[Ast],
     methodReturn: NewMethodReturn,
     modifiers: Seq[NewModifier] = Nil
   ): Ast =
     Ast(method)
-      .withChildren(parameters.map(Ast(_)))
+      .withChildren(parameters)
       .withChild(Ast(NewBlock()))
       .withChildren(modifiers.map(Ast(_)))
       .withChild(Ast(methodReturn))
@@ -330,5 +333,10 @@ abstract class AstCreatorBase(filename: String)(implicit withSchemaValidation: V
     */
   def absolutePath(filename: String): String =
     better.files.File(filename).path.toAbsolutePath.normalize().toString
+
+  /** @return
+    *   the next available name for a closure in this context
+    */
+  def nextClosureName(): String = s"${Defines.ClosurePrefix}${closureKeyPool.next}"
 
 }

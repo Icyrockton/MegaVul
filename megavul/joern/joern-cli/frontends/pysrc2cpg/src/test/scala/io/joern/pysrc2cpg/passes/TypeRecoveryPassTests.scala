@@ -1,13 +1,14 @@
 package io.joern.pysrc2cpg.passes
 
 import io.joern.pysrc2cpg.PySrc2CpgFixture
-import io.joern.x2cpg.passes.frontend.ImportsPass.*
-import io.joern.x2cpg.passes.frontend.{ImportsPass, XTypeHintCallLinker}
-import io.shiftleft.codepropertygraph.generated.nodes.Local
+import io.joern.x2cpg.passes.frontend.XTypeHintCallLinker
+import io.shiftleft.codepropertygraph.generated.nodes.{Call, Identifier, Member}
 import io.shiftleft.semanticcpg.language.*
+import io.shiftleft.semanticcpg.language.importresolver.*
 
 import java.io.File
 import scala.collection.immutable.Seq
+
 class TypeRecoveryPassTests extends PySrc2CpgFixture(withOssDataflow = false) {
 
   "literals declared from built-in types" should {
@@ -71,7 +72,7 @@ class TypeRecoveryPassTests extends PySrc2CpgFixture(withOssDataflow = false) {
         webClientT: UnknownTypeDecl,
         sendGridM: UnknownMethod,
         sendGridT: UnknownTypeDecl
-      ) = cpg.call.where(_.referencedImports).tag.toResolvedImport.toList: @unchecked
+      ) = cpg.call.where(_.referencedImports).tag._toEvaluatedImport.toList: @unchecked
       webClientM.fullName shouldBe "slack_sdk.py:<module>.WebClient.__init__"
       webClientT.fullName shouldBe "slack_sdk.py:<module>.WebClient"
       sendGridM.fullName shouldBe "sendgrid.py:<module>.SendGridAPIClient.__init__"
@@ -215,30 +216,13 @@ class TypeRecoveryPassTests extends PySrc2CpgFixture(withOssDataflow = false) {
       "bar.py"
     ).cpg
 
-    "be able to traverse from `foo.[x|y|db]` to its members" in {
-      val fields            = cpg.fieldAccess.where(_.fieldIdentifier.canonicalName("x", "y", "db")).l
-      val List(mDB, mX, mY) = fields.referencedMember.dedup.sortBy(_.name).l
-
-      mDB.name shouldBe "db"
-      mDB.typeFullName shouldBe "flask_sqlalchemy.py:<module>.SQLAlchemy"
-      mDB.typeDecl.fullName shouldBe "foo.py:<module>"
-
-      mX.name shouldBe "x"
-      mX.typeFullName shouldBe "__builtin.int"
-      mX.typeDecl.fullName shouldBe "foo.py:<module>"
-
-      mY.name shouldBe "y"
-      mY.typeFullName shouldBe "__builtin.str"
-      mY.typeDecl.fullName shouldBe "foo.py:<module>"
-    }
-
     "resolve correct imports via tag nodes" in {
       val List(foo1: UnknownMethod, foo2: UnknownTypeDecl) =
-        cpg.file(".*foo.py").ast.isCall.where(_.referencedImports).tag.toResolvedImport.toList: @unchecked
+        cpg.file(".*foo.py").ast.isCall.where(_.referencedImports).tag._toEvaluatedImport.toList: @unchecked
       foo1.fullName shouldBe "flask_sqlalchemy.py:<module>.SQLAlchemy.__init__"
       foo2.fullName shouldBe "flask_sqlalchemy.py:<module>.SQLAlchemy"
       val List(bar1: ResolvedTypeDecl, bar2: ResolvedMethod) =
-        cpg.file(".*bar.py").ast.isCall.where(_.referencedImports).tag.toResolvedImport.toList: @unchecked
+        cpg.file(".*bar.py").ast.isCall.where(_.referencedImports).tag._toEvaluatedImport.toList: @unchecked
       bar1.fullName shouldBe "foo.py:<module>"
       bar2.fullName shouldBe "foo.py:<module>"
     }
@@ -299,6 +283,23 @@ class TypeRecoveryPassTests extends PySrc2CpgFixture(withOssDataflow = false) {
       d.callee(NoResolve).isExternal.headOption shouldBe Some(true)
     }
 
+    "be able to traverse from `foo.[x|y|db]` to its members" in {
+      val fields            = cpg.fieldAccess.where(_.fieldIdentifier.canonicalName("x", "y", "db")).l
+      val List(mDB, mX, mY) = fields.moduleVariables.referencingMembers.dedup.sortBy(_.name).l
+
+      mDB.name shouldBe "db"
+      mDB.typeFullName shouldBe "flask_sqlalchemy.py:<module>.SQLAlchemy"
+      mDB.typeDecl.fullName shouldBe "foo.py:<module>"
+
+      mX.name shouldBe "x"
+      mX.typeFullName shouldBe "__builtin.int"
+      mX.typeDecl.fullName shouldBe "foo.py:<module>"
+
+      mY.name shouldBe "y"
+      mY.typeFullName shouldBe "__builtin.str"
+      mY.typeDecl.fullName shouldBe "foo.py:<module>"
+    }
+
   }
 
   "type recovery for a field imported as an individual component" should {
@@ -327,7 +328,7 @@ class TypeRecoveryPassTests extends PySrc2CpgFixture(withOssDataflow = false) {
 
     "resolve correct imports via tag nodes" in {
       val List(a: ResolvedTypeDecl, b: ResolvedMethod, c: UnknownImport, d: ResolvedMember) =
-        cpg.file(".*UserController.py").ast.isCall.where(_.referencedImports).tag.toResolvedImport.toList: @unchecked
+        cpg.file(".*UserController.py").ast.isCall.where(_.referencedImports).tag._toEvaluatedImport.toList: @unchecked
       a.fullName shouldBe "app.py:<module>"
       b.fullName shouldBe "app.py:<module>"
       c.path shouldBe "flask.py:<module>.jsonify"
@@ -335,7 +336,7 @@ class TypeRecoveryPassTests extends PySrc2CpgFixture(withOssDataflow = false) {
       d.memberName shouldBe "db"
 
       val List(sqlAlchemyM: UnknownMethod, sqlAlchemyT: UnknownTypeDecl) =
-        cpg.file(".*app.py").ast.isCall.where(_.referencedImports).tag.toResolvedImport.toList: @unchecked
+        cpg.file(".*app.py").ast.isCall.where(_.referencedImports).tag._toEvaluatedImport.toList: @unchecked
       sqlAlchemyM.fullName shouldBe "flask_sqlalchemy.py:<module>.SQLAlchemy.__init__"
       sqlAlchemyT.fullName shouldBe "flask_sqlalchemy.py:<module>.SQLAlchemy"
     }
@@ -373,7 +374,7 @@ class TypeRecoveryPassTests extends PySrc2CpgFixture(withOssDataflow = false) {
         |""".stripMargin).cpg
 
     "resolve correct imports via tag nodes" in {
-      val List(logging: UnknownImport) = cpg.call.where(_.referencedImports).tag.toResolvedImport.toList: @unchecked
+      val List(logging: UnknownImport) = cpg.call.where(_.referencedImports).tag._toEvaluatedImport.toList: @unchecked
       logging.path shouldBe "logging.py:<module>"
     }
 
@@ -397,16 +398,16 @@ class TypeRecoveryPassTests extends PySrc2CpgFixture(withOssDataflow = false) {
 
     "resolve correct imports via tag nodes" in {
       val List(error: UnknownImport, request: UnknownImport) =
-        cpg.call.where(_.referencedImports).tag.toResolvedImport.toList: @unchecked
-      error.path shouldBe "urllib.py:<module>.error"
-      request.path shouldBe "urllib.py:<module>.request"
+        cpg.call.where(_.referencedImports).tag._toEvaluatedImport.toList: @unchecked
+      error.path shouldBe "urllib.py:<module>"
+      request.path shouldBe "urllib.py:<module>"
     }
 
     "reasonably determine the constructor type" in {
       val Some(tmp0) = cpg.identifier("tmp0").headOption: @unchecked
-      tmp0.typeFullName shouldBe "urllib.py:<module>.request"
+      tmp0.typeFullName shouldBe "urllib.py:<module>.<member>(request)"
       val Some(requestCall) = cpg.call("Request").headOption: @unchecked
-      requestCall.methodFullName shouldBe "urllib.py:<module>.request.Request.__init__"
+      requestCall.methodFullName shouldBe "urllib.py:<module>.<member>(request).Request.__init__"
     }
   }
 
@@ -448,16 +449,11 @@ class TypeRecoveryPassTests extends PySrc2CpgFixture(withOssDataflow = false) {
         |        return dict(res).get("customerId", None)
         |""".stripMargin,
       "InstallationDao.py"
-    ).moreCode(
-      """
-        |# dummy file to trigger isExternal = false on methods that are imported from here
-        |""".stripMargin,
-      "pymongo.py"
-    ).cpg
+    )
 
     "resolve correct imports via tag nodes" in {
       val List(a: ResolvedTypeDecl, b: ResolvedMethod, c: UnknownMethod, d: UnknownTypeDecl, e: UnknownImport) =
-        cpg.call.where(_.referencedImports).tag.toResolvedImport.toList: @unchecked
+        cpg.call.where(_.referencedImports).tag._toEvaluatedImport.toList: @unchecked
 
       a.fullName shouldBe "MongoConnection.py:<module>.MongoConnection"
       b.fullName shouldBe "MongoConnection.py:<module>.MongoConnection.__init__"
@@ -586,7 +582,7 @@ class TypeRecoveryPassTests extends PySrc2CpgFixture(withOssDataflow = false) {
         sessionM: ResolvedMethod,
         sqlSessionM: UnknownMethod,
         sqlSessionT: UnknownTypeDecl
-      ) = cpg.call.where(_.referencedImports).tag.toResolvedImport.toList: @unchecked
+      ) = cpg.call.where(_.referencedImports).tag._toEvaluatedImport.toList: @unchecked
       sessionT.fullName shouldBe Seq("data", "db_session.py:<module>").mkString(File.separator)
       sessionM.fullName shouldBe Seq("data", "db_session.py:<module>").mkString(File.separator)
       sqlSessionM.fullName shouldBe Seq("sqlalchemy", "orm.py:<module>.Session.__init__").mkString(File.separator)
@@ -673,7 +669,7 @@ class TypeRecoveryPassTests extends PySrc2CpgFixture(withOssDataflow = false) {
 
     "resolve correct imports via tag nodes" in {
       val List(sqlSessionM: UnknownMethod, sqlSessionT: UnknownTypeDecl, db: ResolvedMember) =
-        cpg.call.where(_.referencedImports).tag.toResolvedImport.toList: @unchecked
+        cpg.call.where(_.referencedImports).tag._toEvaluatedImport.toList: @unchecked
       sqlSessionM.fullName shouldBe Seq("flask_sqlalchemy.py:<module>.SQLAlchemy.__init__").mkString(File.separator)
       sqlSessionT.fullName shouldBe Seq("flask_sqlalchemy.py:<module>.SQLAlchemy").mkString(File.separator)
       db.basePath shouldBe Seq("api", "__init__.py:<module>").mkString(File.separator)
@@ -954,7 +950,7 @@ class TypeRecoveryPassTests extends PySrc2CpgFixture(withOssDataflow = false) {
 
     "resolve correct imports via tag nodes" in {
       val List(djangoModels: UnknownImport, profileT: ResolvedTypeDecl, profileM: ResolvedMethod) =
-        cpg.call.where(_.referencedImports).tag.toResolvedImport.toList: @unchecked
+        cpg.call.where(_.referencedImports).tag._toEvaluatedImport.toList: @unchecked
       djangoModels.path shouldBe Seq("django", "db.py:<module>.models").mkString(File.separator)
       profileT.fullName shouldBe "models.py:<module>.Profile"
       profileM.fullName shouldBe "models.py:<module>.Profile.__init__"
@@ -996,7 +992,7 @@ class TypeRecoveryPassTests extends PySrc2CpgFixture(withOssDataflow = false) {
 
     "resolve correct imports via tag nodes" in {
       val List(connectorT: ResolvedTypeDecl, connectorM: ResolvedMethod) =
-        cpg.call.where(_.referencedImports).tag.toResolvedImport.toList: @unchecked
+        cpg.call.where(_.referencedImports).tag._toEvaluatedImport.toList: @unchecked
       connectorT.fullName shouldBe Seq("lib", "connector.py:<module>.Connector").mkString(File.separator)
       connectorM.fullName shouldBe Seq("lib", "connector.py:<module>.Connector.__init__").mkString(File.separator)
     }
@@ -1178,6 +1174,200 @@ class TypeRecoveryPassTests extends PySrc2CpgFixture(withOssDataflow = false) {
       cpg.identifier("app").forall(_.typeFullName == "fastapi.py:<module>.FastAPI") shouldBe true
     }
 
+  }
+
+  "Modules imported from non-root modules" should {
+    val cpg = code(
+      """
+        |from fastapi import FastAPI
+        |import v1.appv1
+        |from v2.appv2 import appV2
+        |
+        |app = FastAPI(root_path="/api")
+        |
+        |app.mount("/v1", v1.appv1.appV1)
+        |app.mount("/v2", appV2)
+        |""".stripMargin,
+      Seq("code", "itemsrouter.py").mkString(File.separator)
+    ).moreCode(
+      """
+        |appV1 = "v1"
+        |""".stripMargin,
+      Seq("code", "v1", "appv1.py").mkString(File.separator)
+    ).moreCode(
+      """
+        |appV2 = "v2"
+        |""".stripMargin,
+      Seq("code", "v2", "appv2.py").mkString(File.separator)
+    )
+
+    "correctly resolve the type of the `appV1`, via member access" in {
+      val appV1 = cpg.member("appV1").moduleVariables.head
+      appV1.name shouldBe "appV1"
+      appV1.method.fullName.head shouldBe Seq("code", "v1", "appv1.py:<module>").mkString(File.separator)
+      appV1.typeFullName shouldBe "__builtin.str"
+    }
+
+    "correctly resolve the type of the `appV2`, via member access" in {
+      val appV2 = cpg.member("appV2").moduleVariables.head
+      appV2.name shouldBe "appV2"
+      appV2.method.fullName.head shouldBe Seq("code", "v2", "appv2.py:<module>").mkString(File.separator)
+      appV2.typeFullName shouldBe "__builtin.str"
+    }
+
+    // TODO: code.v1 is a directory with multiple modules, but is not a module itself and thus has no member nodes
+    //  pointing to the child modules. This means that field accesses of code.v1 have no base type to rely on failing
+    //  this test case
+    "correctly resolve the type of the `appV1` as a field access argument" ignore {
+      val appV1 = cpg.call
+        .methodFullNameExact("fastapi.py:<module>.FastAPI.mount")
+        .argument
+        .argumentIndex(2)
+        .fieldAccess
+        .where(_.fieldIdentifier.canonicalName("appV1"))
+        .referencedMember
+        .head
+      appV1.typeFullName shouldBe "__builtin.str"
+    }
+
+    "correctly resolve the type of the `appV2` as an identifier argument" in {
+      val appV2 = cpg.call
+        .methodFullNameExact("fastapi.py:<module>.FastAPI.mount")
+        .argument
+        .argumentIndex(2)
+        .isIdentifier
+        .name("appV2")
+        .head
+      appV2.typeFullName shouldBe "__builtin.str"
+    }
+
+  }
+
+  "Literals as the returns of calls" should {
+    val cpg = code("""
+        |def foo():
+        | return "bar"
+        |
+        |x = foo()
+        |""".stripMargin)
+
+    "set the literal's type" in {
+      val barLiteral :: Nil = cpg.method("foo").methodReturn.toReturn.ast.isLiteral.l: @unchecked
+      barLiteral.typeFullName shouldBe "__builtin.str"
+    }
+
+    "set the method's return value correctly" in {
+      cpg.method("foo").methodReturn.typeFullName.head shouldBe "__builtin.str"
+    }
+  }
+
+  "Resolved module variable references" should {
+    val cpg = code(
+      """from fastapi import FastAPI
+        |import itemsrouter
+        |import usersrouter
+        |
+        |app = FastAPI()
+        |
+        |app.include_router(
+        |    itemsrouter.router,
+        |    prefix="/items",
+        |    tags=["items"],
+        |    responses={404: {"description": "Not found"}},
+        |)
+        |app.include_router(
+        |    usersrouter.normal_router,
+        |    usersrouter.admin_router,
+        |    prefix="/users",
+        |    tags=["users"],
+        |    responses={404: {"description": "Not found"}},
+        |)
+        |""".stripMargin,
+      "main.py"
+    )
+      .moreCode(
+        """
+        |from fastapi import APIRouter
+        |
+        |router = APIRouter()
+        |fake_items_db = {"gun": {"name": "Portal Gun"}}
+        |
+        |@router.get("/")
+        |async def read_items():
+        |    return fake_items_db
+        |""".stripMargin,
+        "itemsrouter.py"
+      )
+      .moreCode(
+        """
+          |from fastapi import APIRouter
+          |
+          |normal_router = APIRouter()
+          |admin_router = APIRouter()
+          |fake_users_db = {"plumbus": {"name": "Plumbus"}}
+          |fake_admins_db = {"flumbus": {"name": "Flumbus"}}
+          |
+          |@normal_router.get("/")
+          |async def read_users():
+          |    return fake_users_db
+          |
+          |@admin_router.get("/admin")
+          |async def read_admin():
+          |    return fake_admins_db
+          |
+          |""".stripMargin,
+        "usersrouter.py"
+      )
+
+    "enable traversing from a module variable, to its references, back to other module variable references" in {
+      val variables = cpg.moduleVariables
+        .where(_.typeFullName(".*FastAPI.*"))
+        .l
+      val appIncludeRouterCalls =
+        variables.invokingCalls
+          .nameExact("include_router")
+          .l
+      val includedRouters      = appIncludeRouterCalls.argument.argumentIndexGte(1).moduleVariables.l
+      val definitionsOfRouters = includedRouters.definitions.whereNot(_.source.isCall.nameExact("import")).l
+      val List(adminRouter, normalRouter, itemsRouter) =
+        definitionsOfRouters.map(x => (x.code, x.method.fullName)).sortBy(_._1).l: @unchecked
+
+      adminRouter shouldBe ("admin_router = APIRouter()", "usersrouter.py:<module>")
+      normalRouter shouldBe ("normal_router = APIRouter()", "usersrouter.py:<module>")
+      itemsRouter shouldBe ("router = APIRouter()", "itemsrouter.py:<module>")
+    }
+
+    "enable traversing from a module variable, to its referencing members" in {
+      val appIncludeRouterCalls =
+        cpg.moduleVariables
+          .where(_.typeFullName(".*FastAPI.*"))
+          .l
+      val appMember = appIncludeRouterCalls.referencingMembers.head
+      appMember.name shouldBe "app"
+      appMember.typeDecl.fullName shouldBe "main.py:<module>"
+    }
+  }
+
+  "unknown imports, regardless of relative path" should {
+    val cpg = code(
+      """
+          |import boto3
+          |
+          |def get_thing(bucket: str, path: str, access_key: str, secret_key: str):
+          |    client = boto3.client('s3', aws_access_key_id = access_key, aws_secret_access_key = secret_key)
+          |    return client.get_object(Bucket=bucket, Key=path)
+          |
+          |""".stripMargin,
+      Seq("utils", "botowrapper.py").mkString(File.separator)
+    )
+
+    "be resolved with a simple pseudo-import" in {
+      cpg.call.nameExact("client").methodFullName.head shouldBe "boto3.py:<module>.client"
+    }
+
+    "propagate this value to the receiving identifier's call accordingly" in {
+      cpg.call.nameExact("get_object").methodFullName.head shouldBe "boto3.py:<module>.client.<returnValue>.get_object"
+    }
   }
 
 }

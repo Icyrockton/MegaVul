@@ -1,6 +1,7 @@
 package io.joern.jimple2cpg.passes
 
 import io.joern.jimple2cpg.Config
+import io.joern.jimple2cpg.astcreation.AstCreator
 import io.joern.x2cpg.datastructures.Global
 import io.shiftleft.codepropertygraph.Cpg
 import io.shiftleft.passes.ConcurrentWriterCpgPass
@@ -14,7 +15,7 @@ class SootAstCreationPass(cpg: Cpg, config: Config) extends ConcurrentWriterCpgP
   val global: Global = new Global()
   private val logger = LoggerFactory.getLogger(classOf[AstCreationPass])
 
-  override def generateParts(): Array[_ <: AnyRef] = Scene.v().getApplicationClasses.toArray()
+  override def generateParts(): Array[? <: AnyRef] = Scene.v().getApplicationClasses.toArray()
 
   override def runOnPart(builder: DiffGraphBuilder, part: SootClass): Unit = {
     val jimpleFile = SourceLocator.v().getSourceForClass(part.getName)

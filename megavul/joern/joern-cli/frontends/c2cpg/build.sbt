@@ -1,11 +1,17 @@
 name := "c2cpg"
 
-dependsOn(Projects.semanticcpg, Projects.dataflowengineoss % Test, Projects.x2cpg % "compile->compile;test->test")
+dependsOn(
+  Projects.semanticcpg,
+  Projects.dataflowengineoss % "compile->compile;test->test",
+  Projects.x2cpg             % "compile->compile;test->test"
+)
 
 libraryDependencies ++= Seq(
   "org.scala-lang.modules" %% "scala-parallel-collections" % "1.0.4",
-  "com.diffplug.spotless"   % "spotless-eclipse-cdt"       % "10.5.0",
-  "org.jline"               % "jline"                      % "3.23.0",
+  "org.eclipse.platform"    % "org.eclipse.core.resources" % "3.20.100",
+  "org.eclipse.platform"    % "org.eclipse.text"           % "3.14.0",
+  // see note in readme re self-publishing cdt-core
+  "io.joern"                % "eclipse-cdt-core"           % "8.4.0.202401242025",
   "org.scalatest"          %% "scalatest"                  % Versions.scalatest % Test
 )
 

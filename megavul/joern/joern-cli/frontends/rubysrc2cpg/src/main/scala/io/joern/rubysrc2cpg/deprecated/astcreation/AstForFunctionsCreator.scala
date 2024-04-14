@@ -1,8 +1,9 @@
 package io.joern.rubysrc2cpg.deprecated.astcreation
 
-import io.joern.rubysrc2cpg.deprecated.parser.RubyParser.*
+import io.joern.rubysrc2cpg.deprecated.parser.DeprecatedRubyParser.*
 import io.joern.rubysrc2cpg.deprecated.passes.Defines
 import io.joern.rubysrc2cpg.deprecated.utils.PackageContext
+import io.joern.x2cpg.utils.NodeBuilders.newModifierNode
 import io.joern.x2cpg.{Ast, ValidationMode, Defines as XDefines}
 import io.shiftleft.codepropertygraph.generated.nodes.*
 import io.shiftleft.codepropertygraph.generated.{DispatchTypes, EdgeTypes, ModifierTypes}
@@ -14,7 +15,7 @@ import scala.collection.mutable
 import scala.collection.mutable.ListBuffer
 import scala.jdk.CollectionConverters.*
 
-trait AstForFunctionsCreator(packageContext: PackageContext)(implicit withSchemaValidation: ValidationMode) {
+trait AstForFunctionsCreator(implicit withSchemaValidation: ValidationMode) {
   this: AstCreator =>
 
   private val logger = LoggerFactory.getLogger(getClass)
@@ -53,7 +54,7 @@ trait AstForFunctionsCreator(packageContext: PackageContext)(implicit withSchema
       case Some(ctxMethodNamePart) =>
         astForMethodNamePartContext(ctxMethodNamePart)
       case None =>
-        astForMethodIdentifierContext(ctx.methodIdentifier(), text(ctx))
+        astForMethodIdentifierContext(ctx.methodIdentifier(), code(ctx))
     val callNode = astMethodName.head.nodes.filter(node => node.isInstanceOf[NewCall]).head.asInstanceOf[NewCall]
 
     // Create thisParameter if this is an instance method
@@ -64,7 +65,7 @@ trait AstForFunctionsCreator(packageContext: PackageContext)(implicit withSchema
     } else {
       (callNode.name, classStack.reverse :+ callNode.name mkString pathSep)
     }
-    val newMethodNode = methodNode(ctx, methodName, text(ctx), methodFullName, None, relativeFilename)
+    val newMethodNode = methodNode(ctx, methodName, code(ctx), methodFullName, None, relativeFilename)
       .columnNumber(callNode.columnNumber)
       .lineNumber(callNode.lineNumber)
 
@@ -161,10 +162,10 @@ trait AstForFunctionsCreator(packageContext: PackageContext)(implicit withSchema
     /*
      * This is for operator overloading for the class
      */
-    val name           = text(ctx)
+    val name           = code(ctx)
     val methodFullName = classStack.reverse :+ name mkString pathSep
 
-    val node = callNode(ctx, text(ctx), name, methodFullName, DispatchTypes.STATIC_DISPATCH, None, Option(Defines.Any))
+    val node = callNode(ctx, code(ctx), name, methodFullName, DispatchTypes.STATIC_DISPATCH, None, Option(Defines.Any))
     ctx.children.asScala
       .collectFirst { case x: TerminalNode => x }
       .foreach(x => node.lineNumber(x.lineNumber).columnNumber(x.columnNumber))
@@ -173,12 +174,12 @@ trait AstForFunctionsCreator(packageContext: PackageContext)(implicit withSchema
 
   protected def astForMethodNameContext(ctx: MethodNameContext): Seq[Ast] = {
     if (ctx.methodIdentifier() != null) {
-      astForMethodIdentifierContext(ctx.methodIdentifier(), text(ctx))
+      astForMethodIdentifierContext(ctx.methodIdentifier(), code(ctx))
     } else if (ctx.operatorMethodName() != null) {
       astForOperatorMethodNameContext(ctx.operatorMethodName)
     } else if (ctx.keyword() != null) {
       val node =
-        callNode(ctx, text(ctx), text(ctx), text(ctx), DispatchTypes.STATIC_DISPATCH, None, Option(Defines.Any))
+        callNode(ctx, code(ctx), code(ctx), code(ctx), DispatchTypes.STATIC_DISPATCH, None, Option(Defines.Any))
       ctx.children.asScala
         .collectFirst { case x: TerminalNode => x }
         .foreach(x =>
@@ -266,7 +267,7 @@ trait AstForFunctionsCreator(packageContext: PackageContext)(implicit withSchema
   private def astForAssignmentLikeMethodIdentifierContext(ctx: AssignmentLikeMethodIdentifierContext): Seq[Ast] = {
     Seq(
       callAst(
-        callNode(ctx, text(ctx), text(ctx), text(ctx), DispatchTypes.STATIC_DISPATCH, Some(""), Some(Defines.Any))
+        callNode(ctx, code(ctx), code(ctx), code(ctx), DispatchTypes.STATIC_DISPATCH, Some(""), Some(Defines.Any))
       )
     )
   }
@@ -285,7 +286,7 @@ trait AstForFunctionsCreator(packageContext: PackageContext)(implicit withSchema
   protected def methodForClosureStyleFn(ctx: ParserRuleContext): NewMethod = {
     val procMethodName = s"proc_${blockIdCounter.getAndAdd(1)}"
     val methodFullName = classStack.reverse :+ procMethodName mkString pathSep
-    methodNode(ctx, procMethodName, text(ctx), methodFullName, None, relativeFilename)
+    methodNode(ctx, procMethodName, code(ctx), methodFullName, None, relativeFilename)
   }
 
   protected def astForProcDefinitionContext(ctx: ProcDefinitionContext): Seq[Ast] = {
@@ -305,26 +306,26 @@ trait AstForFunctionsCreator(packageContext: PackageContext)(implicit withSchema
     val methodRetNode = NewMethodReturn()
       .typeFullName(Defines.Any)
 
-    val publicModifier = NewModifier().modifierType(ModifierTypes.PUBLIC)
+    val modifiers = newModifierNode(ModifierTypes.PUBLIC) :: newModifierNode(ModifierTypes.LAMBDA) :: Nil
 
     val methAst = methodAst(
       newMethodNode,
       astMethodParam,
       blockAst(blockNode(ctx), locals ++ astBody.toList),
       methodRetNode,
-      Seq(publicModifier)
+      modifiers
     )
     blockMethods.addOne(methAst)
 
     val callArgs = astMethodParam
       .flatMap(_.root)
       .collect { case x: NewMethodParameterIn => x }
-      .map(param => Ast(createIdentifierWithScope(ctx, param.name, param.code, Defines.Any, Seq())))
+      .map(param => Ast(createIdentifierWithScope(ctx, param.name, param.code, Defines.Any, Seq(), true)))
 
     val procCallNode =
       callNode(
         ctx,
-        text(ctx),
+        code(ctx),
         newMethodNode.name,
         newMethodNode.fullName,
         DispatchTypes.STATIC_DISPATCH,
@@ -361,7 +362,7 @@ trait AstForFunctionsCreator(packageContext: PackageContext)(implicit withSchema
      * Model a block as a method
      */
     val methodFullName = classStack.reverse :+ blockMethodName mkString pathSep
-    val newMethodNode = methodNode(ctxStmt, blockMethodName, text(ctxStmt), methodFullName, None, relativeFilename)
+    val newMethodNode = methodNode(ctxStmt, blockMethodName, code(ctxStmt), methodFullName, None, relativeFilename)
       .lineNumber(lineStart)
       .lineNumberEnd(lineEnd)
       .columnNumber(colStart)

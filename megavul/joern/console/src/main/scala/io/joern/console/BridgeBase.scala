@@ -1,21 +1,20 @@
 package io.joern.console
 
 import better.files.*
+import io.shiftleft.codepropertygraph.generated.Languages
+import org.apache.commons.text.StringEscapeUtils
 import replpp.scripting.ScriptRunner
 
+import java.nio.file.{Files, Path}
 import scala.jdk.CollectionConverters.*
-import io.shiftleft.codepropertygraph.generated.Languages
-import java.io.{InputStream, PrintStream, File as JFile}
-import java.net.URLClassLoader
-import java.nio.file.{Files, Path, Paths}
-import java.util.stream.Collectors
-import scala.util.{Failure, Success, Try}
+import scala.util.Try
 
 case class Config(
   scriptFile: Option[Path] = None,
   command: Option[String] = None,
   params: Map[String, String] = Map.empty,
   additionalImports: Seq[Path] = Nil,
+  additionalClasspathEntries: Seq[String] = Seq.empty,
   addPlugin: Option[String] = None,
   rmPlugin: Option[String] = None,
   pluginToRun: Option[String] = None,
@@ -43,10 +42,10 @@ case class Config(
   */
 trait BridgeBase extends InteractiveShell with ScriptExecution with PluginHandling with ServerHandling {
 
-  def slProduct: SLProduct
+  def applicationName: String
 
   protected def parseConfig(args: Array[String]): Config = {
-    val parser = new scopt.OptionParser[Config](slProduct.name) {
+    val parser = new scopt.OptionParser[Config](applicationName) {
       override def errorOnUnknownArgument = false
 
       note("Script execution")
@@ -73,6 +72,13 @@ trait BridgeBase extends InteractiveShell with ScriptExecution with PluginHandli
         .optional()
         .action((x, c) => c.copy(additionalImports = c.additionalImports :+ x))
         .text("import (and run) additional script(s) on startup - may be passed multiple times")
+
+      opt[String]("classpathEntry")
+        .valueName("path/to/classpath")
+        .unbounded()
+        .optional()
+        .action((x, c) => c.copy(additionalClasspathEntries = c.additionalClasspathEntries :+ x))
+        .text("additional classpath entries - may be passed multiple times")
 
       opt[String]('d', "dep")
         .valueName("com.michaelpollmeier:versionsort:1.0.7")
@@ -199,7 +205,7 @@ trait BridgeBase extends InteractiveShell with ScriptExecution with PluginHandli
       GlobalReporting.enable()
       startHttpServer(config)
     } else if (config.pluginToRun.isDefined) {
-      runPlugin(config, slProduct.name)
+      runPlugin(config)
     } else {
       startInteractiveShell(config)
     }
@@ -237,9 +243,14 @@ trait InteractiveShell { this: BridgeBase =>
       replpp.Config(
         predefFiles = predefFile +: config.additionalImports,
         nocolors = config.nocolors,
-        dependencies = config.dependencies,
-        resolvers = config.resolvers,
         verbose = config.verbose,
+        classpathConfig = replpp.Config
+          .ForClasspath(
+            additionalClasspathEntries = config.additionalClasspathEntries,
+            inheritClasspath = true,
+            dependencies = config.dependencies,
+            resolvers = config.resolvers
+          ),
         greeting = Option(greeting),
         prompt = Option(promptStr),
         onExitCode = Option(onExitCode),
@@ -264,9 +275,9 @@ trait ScriptExecution { this: BridgeBase =>
           scriptFile = Option(scriptFile),
           command = config.command,
           params = config.params,
-          dependencies = config.dependencies,
-          resolvers = config.resolvers,
-          verbose = config.verbose
+          verbose = config.verbose,
+          classpathConfig = replpp.Config
+            .ForClasspath(inheritClasspath = true, dependencies = config.dependencies, resolvers = config.resolvers)
         )
       )
       if (config.verbose && scriptReturn.isFailure) {
@@ -299,7 +310,7 @@ trait PluginHandling { this: BridgeBase =>
     new PluginManager(InstallConfig().rootPath).listPlugins().foreach(println)
     println("Available layer creators")
     println()
-    withTemporaryScript(codeToListPlugins(), slProduct.name) { file =>
+    withTemporaryScript(codeToListPlugins()) { file =>
       runScript(config.copy(scriptFile = Some(file.path))).get
     }
   }
@@ -312,13 +323,13 @@ trait PluginHandling { this: BridgeBase =>
   }
 
   /** Run plugin by generating a temporary script based on the given config and execute the script */
-  protected def runPlugin(config: Config, productName: String): Unit = {
+  protected def runPlugin(config: Config): Unit = {
     if (config.src.isEmpty) {
       println("You must supply a source directory with the --src flag")
       return
     }
-    val code = loadOrCreateCpg(config, productName)
-    withTemporaryScript(code, productName) { file =>
+    val code = loadOrCreateCpg(config, applicationName)
+    withTemporaryScript(code) { file =>
       runScript(config.copy(scriptFile = Some(file.path))).get
     }
   }
@@ -328,7 +339,8 @@ trait PluginHandling { this: BridgeBase =>
   private def loadOrCreateCpg(config: Config, productName: String): String = {
 
     val bundleName = config.pluginToRun.get
-    val src        = better.files.File(config.src.get).path.toAbsolutePath.toString
+    val srcRaw     = better.files.File(config.src.get).path.toAbsolutePath.toString
+    val src        = StringEscapeUtils.escapeJava(srcRaw)
     val language   = languageFromConfig(config, src)
 
     val storeCode = if (config.store) { "save" }
@@ -381,8 +393,8 @@ trait PluginHandling { this: BridgeBase =>
     }
   }
 
-  private def withTemporaryScript(code: String, prefix: String)(f: File => Unit): Unit = {
-    File.usingTemporaryDirectory(prefix + "-bundle") { dir =>
+  private def withTemporaryScript(code: String)(f: File => Unit): Unit = {
+    File.usingTemporaryDirectory(applicationName + "-bundle") { dir =>
       val file = dir / "script.sc"
       file.write(code)
       f(file)
@@ -398,9 +410,9 @@ trait ServerHandling { this: BridgeBase =>
 
     val baseConfig = replpp.Config(
       predefFiles = predefFile +: config.additionalImports,
-      dependencies = config.dependencies,
-      resolvers = config.resolvers,
-      verbose = true // always print what's happening - helps debugging
+      verbose = true, // always print what's happening - helps debugging
+      classpathConfig = replpp.Config
+        .ForClasspath(inheritClasspath = true, dependencies = config.dependencies, resolvers = config.resolvers)
     )
 
     replpp.server.ReplServer.startHttpServer(

@@ -1,31 +1,31 @@
 package io.joern.jssrc2cpg.passes
 
+import io.joern.x2cpg.Defines as XDefines
 import io.joern.x2cpg.Defines.ConstructorMethodName
-import io.joern.x2cpg.passes.frontend._
-import io.joern.x2cpg.{Defines => XDefines}
+import io.joern.x2cpg.passes.frontend.*
 import io.shiftleft.codepropertygraph.Cpg
-import io.shiftleft.codepropertygraph.generated.nodes._
+import io.shiftleft.codepropertygraph.generated.nodes.*
 import io.shiftleft.codepropertygraph.generated.{Operators, PropertyNames}
-import io.shiftleft.semanticcpg.language._
+import io.shiftleft.semanticcpg.language.*
 import io.shiftleft.semanticcpg.language.operatorextension.OpNodes.FieldAccess
 import overflowdb.BatchedUpdate.DiffGraphBuilder
 
-class JavaScriptTypeRecoveryPass(cpg: Cpg, config: XTypeRecoveryConfig = XTypeRecoveryConfig())
-    extends XTypeRecoveryPass[File](cpg, config) {
-  override protected def generateRecoveryPass(state: XTypeRecoveryState): XTypeRecovery[File] =
-    new JavaScriptTypeRecovery(cpg, state)
+class JavaScriptTypeRecoveryPassGenerator(cpg: Cpg, config: XTypeRecoveryConfig = XTypeRecoveryConfig())
+    extends XTypeRecoveryPassGenerator[File](cpg, config) {
+  override protected def generateRecoveryPass(state: XTypeRecoveryState, iteration: Int): XTypeRecovery[File] =
+    new JavaScriptTypeRecovery(cpg, state, iteration)
 }
 
-private class JavaScriptTypeRecovery(cpg: Cpg, state: XTypeRecoveryState) extends XTypeRecovery[File](cpg, state) {
+private class JavaScriptTypeRecovery(cpg: Cpg, state: XTypeRecoveryState, iteration: Int)
+    extends XTypeRecovery[File](cpg, state, iteration) {
 
-  override def compilationUnit: Iterator[File] = cpg.file.iterator
+  override def compilationUnits: Iterator[File] = cpg.file.iterator
 
   override def generateRecoveryForCompilationUnitTask(
     unit: File,
     builder: DiffGraphBuilder
   ): RecoverForXCompilationUnit[File] = {
-    val newConfig = state.config.copy(enabledDummyTypes = state.isFinalIteration && state.config.enabledDummyTypes)
-    new RecoverForJavaScriptFile(cpg, unit, builder, state.copy(config = newConfig))
+    new RecoverForJavaScriptFile(cpg, unit, builder, state)
   }
 
 }
@@ -35,7 +35,7 @@ private class RecoverForJavaScriptFile(cpg: Cpg, cu: File, builder: DiffGraphBui
 
   import io.joern.x2cpg.passes.frontend.XTypeRecovery.AllNodeTypesFromNodeExt
 
-  override protected val pathSep = ':'
+  override protected val pathSep = ":"
 
   /** A heuristic method to determine if a call is a constructor or not.
     */
@@ -58,10 +58,26 @@ private class RecoverForJavaScriptFile(cpg: Cpg, cu: File, builder: DiffGraphBui
         else symbolTable.put(x, x.getKnownTypes)
       if (!resolvedTypeHints.contains(typeFullName) && resolvedTypeHints.sizeIs == 1)
         builder.setNodeProperty(x, PropertyNames.TYPE_FULL_NAME, resolvedTypeHints.head)
+
+    case x @ (_: Identifier | _: Local | _: MethodParameterIn)
+        if x.property(PropertyNames.POSSIBLE_TYPES, Seq.empty[String]).nonEmpty =>
+      val possibleTypes = x.property(PropertyNames.POSSIBLE_TYPES, Seq.empty[String])
+      if (possibleTypes.sizeIs == 1 && !possibleTypes.contains("ANY")) {
+        val typeFullName         = possibleTypes.head
+        val typeHints            = symbolTable.get(LocalVar(typeFullName)) - typeFullName
+        lazy val cpgTypeFullName = cpg.typeDecl.nameExact(typeFullName).fullName.toSet
+        val resolvedTypeHints =
+          if (typeHints.nonEmpty) symbolTable.put(x, typeHints)
+          else if (cpgTypeFullName.nonEmpty) symbolTable.put(x, cpgTypeFullName)
+          else symbolTable.put(x, x.getKnownTypes)
+        if (!resolvedTypeHints.contains(typeFullName) && resolvedTypeHints.sizeIs == 1)
+          builder.setNodeProperty(x, PropertyNames.TYPE_FULL_NAME, resolvedTypeHints.head)
+      }
     case x @ (_: Identifier | _: Local | _: MethodParameterIn) =>
       symbolTable.put(x, x.getKnownTypes)
-    case x: Call => symbolTable.put(x, (x.methodFullName +: x.dynamicTypeHintFullName).toSet)
-    case _       =>
+    case call: Call =>
+      symbolTable.put(call, (call.methodFullName +: (call.dynamicTypeHintFullName ++ call.possibleTypes)).toSet)
+    case _ =>
   }
 
   override protected def prepopulateSymbolTable(): Unit = {
@@ -78,7 +94,7 @@ private class RecoverForJavaScriptFile(cpg: Cpg, cu: File, builder: DiffGraphBui
         }
         .flatMap {
           case (t, ts) if Set(t) == ts => Set(t)
-          case (_, ts)                 => ts.map(_.replaceAll("\\.(?!js::program)", pathSep.toString))
+          case (_, ts)                 => ts.map(_.replaceAll("\\.(?!js::program)", pathSep))
         }
       p match {
         case _: MethodParameterIn => symbolTable.put(p, resolvedHints)
@@ -94,8 +110,7 @@ private class RecoverForJavaScriptFile(cpg: Cpg, cu: File, builder: DiffGraphBui
 
   private lazy val exportedIdentifiers = cu.method
     .nameExact(":program")
-    .ast
-    .isCall
+    .flatMap(_._callViaContainsOut)
     .nameExact(Operators.assignment)
     .filter(_.code.startsWith("exports.*"))
     .argument
@@ -103,19 +118,21 @@ private class RecoverForJavaScriptFile(cpg: Cpg, cu: File, builder: DiffGraphBui
     .name
     .toSet
 
-  override protected def isField(i: Identifier): Boolean =
-    state.isFieldCache.getOrElseUpdate(i.id(), exportedIdentifiers.contains(i.name) || super.isField(i))
+  override protected def isFieldUncached(i: Identifier): Boolean =
+    exportedIdentifiers.contains(i.name) || super.isFieldUncached(i)
 
   override protected def visitIdentifierAssignedToConstructor(i: Identifier, c: Call): Set[String] = {
     val constructorPaths = if (c.methodFullName.endsWith(".alloc")) {
       def newChildren = c.inAssignment.astSiblings.isCall.nameExact("<operator>.new").astChildren
       val possibleImportIdentifier = newChildren.isIdentifier.headOption match {
-        case Some(i) if GlobalBuiltins.builtins.contains(i.name) => Set(s"__ecma.${i.name}")
-        case Some(i)                                             => symbolTable.get(i)
-        case None                                                => Set.empty[String]
+        case Some(id) if GlobalBuiltins.builtins.contains(id.name) => Set(s"__ecma.${id.name}")
+        case Some(id)                                              => symbolTable.get(id)
+        case None                                                  => Set.empty[String]
       }
       lazy val possibleConstructorPointer =
-        newChildren.astChildren.isFieldIdentifier.map(f => CallAlias(f.canonicalName, Some("this"))).headOption match {
+        newChildren.astChildren.isFieldIdentifier
+          .map(f => CallAlias(f.canonicalName, Option("this")))
+          .headOption match {
           case Some(fi) => symbolTable.get(fi)
           case None     => Set.empty[String]
         }
@@ -131,10 +148,12 @@ private class RecoverForJavaScriptFile(cpg: Cpg, cu: File, builder: DiffGraphBui
     operation match {
       case "<operator>.new" =>
         c.astChildren.l match {
-          case ::(fa: Call, ::(i: Identifier, _)) if fa.name == Operators.fieldAccess =>
+          case ::(fa: Call, ::(id: Identifier, _)) if fa.name == Operators.fieldAccess =>
             symbolTable.append(
               c,
-              visitIdentifierAssignedToFieldLoad(i, new FieldAccess(fa)).map(t => s"$t$pathSep$ConstructorMethodName")
+              visitIdentifierAssignedToFieldLoad(id, fa.asInstanceOf[FieldAccess]).map(t =>
+                s"$t$pathSep$ConstructorMethodName"
+              )
             )
           case _ => Set.empty
         }
@@ -185,7 +204,8 @@ private class RecoverForJavaScriptFile(cpg: Cpg, cu: File, builder: DiffGraphBui
 
   override protected def postSetTypeInformation(): Unit = {
     // often there are "this" identifiers with type hints but this can be set to a type hint if they meet the criteria
-    cu.ast.isIdentifier
+    cu.method
+      .flatMap(_._identifierViaContainsOut)
       .nameExact("this")
       .where(_.typeFullNameExact(Defines.Any))
       .filterNot(_.dynamicTypeHintFullName.isEmpty)

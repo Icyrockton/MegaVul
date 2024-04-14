@@ -1,6 +1,6 @@
 package io.joern.c2cpg.macros
 
-import io.joern.c2cpg.testfixtures.CCodeToCpgSuite
+import io.joern.c2cpg.testfixtures.C2CpgSuite
 import io.joern.c2cpg.testfixtures.DataFlowCodeToCpgSuite
 import io.joern.dataflowengineoss.language._
 import io.shiftleft.codepropertygraph.generated.DispatchTypes
@@ -10,7 +10,7 @@ import io.shiftleft.codepropertygraph.generated.nodes.Call
 import io.shiftleft.codepropertygraph.generated.nodes.Identifier
 import io.shiftleft.semanticcpg.language._
 
-class MacroHandlingTests extends CCodeToCpgSuite {
+class MacroHandlingTests extends C2CpgSuite {
 
   "MacroHandlingTests1" should {
     val cpg = code("""
@@ -29,6 +29,9 @@ class MacroHandlingTests extends CCodeToCpgSuite {
 
       val List(macroCall) = cpg.method("foo").call.nameExact("A_MACRO").l
       macroCall.code shouldBe "A_MACRO(*y, 2)"
+
+      val List(macroExpansion) = macroCall.macroExpansion.isCall.l
+      macroExpansion shouldBe x
 
       val List(arg1) = macroCall.argument.isCall.l
       arg1.name shouldBe Operators.indirection
@@ -183,6 +186,8 @@ class MacroHandlingTests extends CCodeToCpgSuite {
       call.name shouldBe "A_MACRO"
       call.code shouldBe "A_MACRO"
       call.argument.size shouldBe 0
+      val List(macroExpansion) = call.macroExpansion.isLiteral.l
+      macroExpansion.code shouldBe "1"
     }
   }
 
@@ -199,6 +204,8 @@ class MacroHandlingTests extends CCodeToCpgSuite {
       call.name shouldBe "A_MACRO"
       call.code shouldBe "A_MACRO"
       call.argument.size shouldBe 0
+      val List(macroExpansion) = call.macroExpansion.isLiteral.l
+      macroExpansion.code shouldBe "0x0"
     }
 
   }
@@ -251,6 +258,44 @@ class MacroHandlingTests extends CCodeToCpgSuite {
       andCall2Arg1.name shouldBe "FLAG_A"
       val List(andCall2Arg2) = andCall2.argument.isIdentifier.l
       andCall2Arg2.name shouldBe "x"
+    }
+  }
+
+  "MacroHandlingTests9" should {
+    val cpg = code(
+      """
+        |// _Generic is a macro from C11 currently un-parsable by the used CDT parser version
+        |#define type_num(X) _Generic((X), \
+        |  long double: 1, \
+        |  default: 0, \
+        |  float: 2 \
+        | )
+        |
+        |int test_generic(void) {
+        |  float x = 8.0;
+        |  const float y = 3.375;
+        |  int z = type_num(x);
+        |  return z;
+        |}""".stripMargin,
+      "file.cpp"
+    )
+
+    "should recover from un-parsable macros" in {
+      val List(localZ) = cpg.local.nameExact("z").l
+      localZ.code shouldBe "int z"
+      localZ.typeFullName shouldBe "int"
+      localZ.lineNumber shouldBe Some(12)
+      localZ.columnNumber shouldBe Some(7)
+      val List(zAssignmentCall) = cpg.call.codeExact("z = type_num(x)").l
+      val zIdentifier           = zAssignmentCall.argument(1).asInstanceOf[Identifier]
+      zIdentifier.code shouldBe "z"
+      zIdentifier.lineNumber shouldBe Some(12)
+      zIdentifier.columnNumber shouldBe Some(7)
+      val typeNumCall = zAssignmentCall.argument(2).asInstanceOf[Call]
+      typeNumCall.code shouldBe "type_num(x)"
+      typeNumCall.name shouldBe "type_num"
+      typeNumCall.lineNumber shouldBe Some(12)
+      typeNumCall.columnNumber shouldBe Some(11)
     }
   }
 }

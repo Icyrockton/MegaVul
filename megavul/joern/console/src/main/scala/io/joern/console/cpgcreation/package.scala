@@ -1,10 +1,11 @@
 package io.joern.console
 
-import io.shiftleft.codepropertygraph.generated.Languages
 import better.files.File
+import io.shiftleft.codepropertygraph.generated.Languages
 
 import java.nio.file.Path
 import scala.collection.mutable
+import scala.util.Try
 
 package object cpgcreation {
 
@@ -18,12 +19,12 @@ package object cpgcreation {
   ): Option[CpgGenerator] = {
     lazy val conf = config.withArgs(args)
     language match {
-      case Languages.CSHARP             => Some(CSharpCpgGenerator(conf, rootPath))
-      case Languages.C | Languages.NEWC => Some(CCpgGenerator(conf, rootPath))
-      case Languages.LLVM               => Some(LlvmCpgGenerator(conf, rootPath))
-      case Languages.GOLANG             => Some(GoCpgGenerator(conf, rootPath))
-      case Languages.JAVA               => Some(JavaCpgGenerator(conf, rootPath))
-      case Languages.JAVASRC            => Some(JavaSrcCpgGenerator(conf, rootPath))
+      case Languages.CSHARP | Languages.CSHARPSRC => Some(CSharpCpgGenerator(conf, rootPath))
+      case Languages.C | Languages.NEWC           => Some(CCpgGenerator(conf, rootPath))
+      case Languages.LLVM                         => Some(LlvmCpgGenerator(conf, rootPath))
+      case Languages.GOLANG                       => Some(GoCpgGenerator(conf, rootPath))
+      case Languages.JAVA                         => Some(JavaCpgGenerator(conf, rootPath))
+      case Languages.JAVASRC                      => Some(JavaSrcCpgGenerator(conf, rootPath))
       case Languages.JSSRC | Languages.JAVASCRIPT =>
         val jssrc = JsSrcCpgGenerator(conf, rootPath)
         if (jssrc.isAvailable) Some(jssrc)
@@ -34,6 +35,7 @@ package object cpgcreation {
       case Languages.GHIDRA    => Some(GhidraCpgGenerator(conf, rootPath))
       case Languages.KOTLIN    => Some(KotlinCpgGenerator(conf, rootPath))
       case Languages.RUBYSRC   => Some(RubyCpgGenerator(conf, rootPath))
+      case Languages.SWIFTSRC  => Some(SwiftSrcCpgGenerator(conf, rootPath))
       case _                   => None
     }
   }
@@ -93,7 +95,7 @@ package object cpgcreation {
   private def guessLanguageForRegularFile(file: File): Option[String] = {
     file.name.toLowerCase match {
       case f if isJavaBinary(f)      => Some(Languages.JAVA)
-      case f if isCsharpFile(f)      => Some(Languages.CSHARP)
+      case f if isCsharpFile(f)      => Some(Languages.CSHARPSRC)
       case f if isGoFile(f)          => Some(Languages.GOLANG)
       case f if isJsFile(f)          => Some(Languages.JSSRC)
       case f if f.endsWith(".java")  => Some(Languages.JAVASRC)
@@ -102,10 +104,19 @@ package object cpgcreation {
       case f if f.endsWith(".php")   => Some(Languages.PHP)
       case f if f.endsWith(".py")    => Some(Languages.PYTHONSRC)
       case f if f.endsWith(".rb")    => Some(Languages.RUBYSRC)
+      case f if f.endsWith(".swift") => Some(Languages.SWIFTSRC)
       case f if isLlvmFile(f)        => Some(Languages.LLVM)
       case f if isCFile(f)           => Some(Languages.NEWC)
       case _                         => None
     }
+  }
+
+  def withFileInTmpFile(inputPath: String)(f: File => Try[String]): Try[String] = {
+    val dir = File.newTemporaryDirectory("cpgcreation")
+    File(inputPath).copyToDirectory(dir)
+    val result = f(dir)
+    dir.deleteOnExit(swallowIOExceptions = true)
+    result
   }
 
 }

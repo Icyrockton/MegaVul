@@ -5,7 +5,7 @@ import com.typesafe.config.{Config, ConfigFactory}
 
 name := "jssrc2cpg"
 
-dependsOn(Projects.dataflowengineoss, Projects.x2cpg % "compile->compile;test->test")
+dependsOn(Projects.dataflowengineoss % "compile->compile;test->test", Projects.x2cpg % "compile->compile;test->test")
 
 lazy val appProperties = settingKey[Config]("App Properties")
 appProperties := {
@@ -19,10 +19,7 @@ astGenVersion := appProperties.value.getString("jssrc2cpg.astgen_version")
 
 libraryDependencies ++= Seq(
   "io.shiftleft"              %% "codepropertygraph" % Versions.cpg,
-  "com.lihaoyi"               %% "upickle"           % Versions.upickle,
-  "com.fasterxml.jackson.core" % "jackson-databind"  % "2.15.2",
-  "com.typesafe"               % "config"            % "1.4.2",
-  "com.michaelpollmeier"       % "versionsort"       % "1.0.11",
+  "com.fasterxml.jackson.core" % "jackson-databind"  % "2.17.0",
   "org.scalatest"             %% "scalatest"         % Versions.scalatest % Test
 )
 
@@ -75,15 +72,9 @@ astGenBinaryNames := {
 lazy val astGenDlTask = taskKey[Unit](s"Download astgen binaries")
 astGenDlTask := {
   val astGenDir = baseDirectory.value / "bin" / "astgen"
-  astGenDir.mkdirs()
 
   astGenBinaryNames.value.foreach { fileName =>
-    val dest = astGenDir / fileName
-    if (!dest.exists) {
-      val url            = s"${astGenDlUrl.value}$fileName"
-      val downloadedFile = SimpleCache.downloadMaybe(url)
-      IO.copyFile(downloadedFile, dest)
-    }
+    DownloadHelper.ensureIsAvailable(s"${astGenDlUrl.value}$fileName", astGenDir / fileName)
   }
 
   val distDir = (Universal / stagingDirectory).value / "bin" / "astgen"
@@ -104,14 +95,6 @@ stage := Def
   .sequential(astGenSetAllPlatforms, Universal / stage)
   .andFinally(System.setProperty("ALL_PLATFORMS", "FALSE"))
   .value
-
-// Also remove astgen binaries with clean, e.g., to allow for updating them.
-// Sadly, we can't define the bin/ folders globally,
-// as .value can only be used within a task or setting macro
-cleanFiles ++= Seq(
-  baseDirectory.value / "bin" / "astgen",
-  (Universal / stagingDirectory).value / "bin" / "astgen"
-) ++ astGenBinaryNames.value.map(fileName => SimpleCache.encodeFile(s"${astGenDlUrl.value}$fileName"))
 
 Universal / packageName       := name.value
 Universal / topLevelDirectory := None

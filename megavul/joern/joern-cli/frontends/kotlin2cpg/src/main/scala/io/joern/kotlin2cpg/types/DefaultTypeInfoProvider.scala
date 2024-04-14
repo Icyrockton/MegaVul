@@ -82,7 +82,7 @@ class DefaultTypeInfoProvider(environment: KotlinCoreEnvironment) extends TypeIn
     } match {
       case Success(analysisResult) => analysisResult.getBindingContext
       case Failure(exc) =>
-        logger.error(s"Kotlin compiler analysis failed with exception `${exc.toString}`:`${exc.getMessage}`.")
+        logger.error(s"Kotlin compiler analysis failed with exception `${exc.toString}`:`${exc.getMessage}`.", exc)
         BindingContext.EMPTY
     }
   }
@@ -443,7 +443,7 @@ class DefaultTypeInfoProvider(environment: KotlinCoreEnvironment) extends TypeIn
 
   def typeFullName(expr: KtAnnotationEntry, defaultValue: String): String = {
     Option(bindingsForEntity(bindingContext, expr))
-      .map(_ => bindingContext.get(BindingContext.ANNOTATION, expr))
+      .flatMap(_ => Option(bindingContext.get(BindingContext.ANNOTATION, expr)))
       .map { desc => TypeRenderer.render(desc.getType) }
       .getOrElse(defaultValue)
   }
@@ -685,12 +685,11 @@ class DefaultTypeInfoProvider(environment: KotlinCoreEnvironment) extends TypeIn
     TypeConstants.javaLangObject
   }
 
-  def fullNameWithSignature(expr: KtLambdaExpression, keyPool: KeyPool): (String, String) = {
+  def fullNameWithSignature(expr: KtLambdaExpression, lambdaName: String): (String, String) = {
     val containingFile      = expr.getContainingKtFile
     val fileName            = containingFile.getName
     val packageName         = containingFile.getPackageFqName.toString
-    val lambdaNum           = keyPool.next
-    val astDerivedFullName  = s"$packageName:<lambda><f_${fileName}_no$lambdaNum>()"
+    val astDerivedFullName  = s"$packageName:<f_$fileName>.$lambdaName()"
     val astDerivedSignature = anySignature(expr.getValueParameters.asScala.toList)
 
     val render = for {
@@ -710,8 +709,8 @@ class DefaultTypeInfoProvider(environment: KotlinCoreEnvironment) extends TypeIn
         if (args.isEmpty) ""
         else if (args.size == 1) TypeConstants.javaLangObject
         else s"${TypeConstants.javaLangObject}${("," + TypeConstants.javaLangObject) * (args.size - 1)}"
-      val signature = s"${renderedRetType}($renderedArgs)"
-      val fullName  = s"$packageName.<lambda><f_${fileName}_no${lambdaNum.toString}>:$signature"
+      val signature = s"$renderedRetType($renderedArgs)"
+      val fullName  = s"$packageName.<f_$fileName>.$lambdaName:$signature"
       (fullName, signature)
     }
     render.getOrElse((astDerivedFullName, astDerivedSignature))
@@ -749,10 +748,8 @@ class DefaultTypeInfoProvider(environment: KotlinCoreEnvironment) extends TypeIn
       parameterType(parameter, explicitTypeFullName)
     }
     val paramListSignature = s"(${paramTypeNames.mkString(",")})"
-    val methodName = Option(fnDesc)
-      .map { desc =>
-        s"${TypeRenderer.renderFqNameForDesc(desc.get)}${TypeConstants.initPrefix}"
-      }
+    val methodName = fnDesc
+      .map(desc => s"${TypeRenderer.renderFqNameForDesc(desc)}${TypeConstants.initPrefix}")
       .getOrElse(s"${Defines.UnresolvedNamespace}.${TypeConstants.initPrefix}")
     val signature = s"${TypeConstants.void}$paramListSignature"
     val fullname  = s"$methodName:$signature"
@@ -781,12 +778,11 @@ class DefaultTypeInfoProvider(environment: KotlinCoreEnvironment) extends TypeIn
     (fullname, signature)
   }
 
-  def fullNameWithSignatureAsLambda(expr: KtNamedFunction, keyPool: KeyPool): (String, String) = {
+  def fullNameWithSignatureAsLambda(expr: KtNamedFunction, lambdaName: String): (String, String) = {
     val containingFile      = expr.getContainingKtFile
     val fileName            = containingFile.getName
     val packageName         = containingFile.getPackageFqName.toString
-    val lambdaNum           = keyPool.next
-    val astDerivedFullName  = s"$packageName:<lambda><f_${fileName}_no$lambdaNum>()"
+    val astDerivedFullName  = s"$packageName:<f_$fileName>.$lambdaName()"
     val astDerivedSignature = anySignature(expr.getValueParameters.asScala.toList)
 
     val render = for {
@@ -806,8 +802,8 @@ class DefaultTypeInfoProvider(environment: KotlinCoreEnvironment) extends TypeIn
         if (args.isEmpty) ""
         else if (args.size == 1) TypeConstants.javaLangObject
         else s"${TypeConstants.javaLangObject}${("," + TypeConstants.javaLangObject) * (args.size - 1)}"
-      val signature = s"${renderedRetType}($renderedArgs)"
-      val fullName  = s"$packageName.<lambda><f_${fileName}_no${lambdaNum.toString}>:$signature"
+      val signature = s"$renderedRetType($renderedArgs)"
+      val fullName  = s"$packageName.<f_$fileName>.$lambdaName:$signature"
       (fullName, signature)
     }
     render.getOrElse((astDerivedFullName, astDerivedSignature))

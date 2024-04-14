@@ -107,8 +107,20 @@ class TypeDeclTraversal(val traversal: Iterator[TypeDecl]) extends AnyVal {
   def aliasTypeDeclTransitive: Iterator[TypeDecl] =
     traversal.repeat(_.aliasTypeDecl)(_.emitAllButFirst)
 
+  def content: Iterator[String] = {
+    traversal.flatMap(contentOnSingle)
+  }
 }
 
 object TypeDeclTraversal {
   private val maxAliasExpansions = 100
+
+  private def contentOnSingle(typeDecl: TypeDecl): Option[String] = {
+    for {
+      content <- typeDecl.file.content.headOption
+      if content != File.PropertyDefaults.Content
+      offset    <- typeDecl.offset
+      offsetEnd <- typeDecl.offsetEnd
+    } yield content.slice(offset, offsetEnd)
+  }
 }

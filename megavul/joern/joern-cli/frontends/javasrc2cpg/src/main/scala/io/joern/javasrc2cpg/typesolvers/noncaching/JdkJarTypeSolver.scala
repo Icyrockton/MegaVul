@@ -8,6 +8,7 @@ import io.joern.javasrc2cpg.typesolvers.JdkJarTypeSolver.*
 import io.joern.x2cpg.SourceFiles
 import javassist.{ClassPath, CtClass}
 import org.slf4j.LoggerFactory
+import better.files.File.VisitOptions
 
 import java.io.IOException
 import java.util.jar.JarFile
@@ -15,14 +16,9 @@ import scala.collection.mutable
 import scala.jdk.CollectionConverters.*
 import scala.util.{Failure, Success, Try, Using}
 
-class JdkJarTypeSolver extends TypeSolver {
-
-  private val logger = LoggerFactory.getLogger(this.getClass())
+class JdkJarTypeSolver(classPool: NonCachingClassPool, knownPackagePrefixes: Set[String]) extends TypeSolver {
 
   private var parent: Option[TypeSolver] = None
-  private val classPool                  = new NonCachingClassPool()
-
-  private val knownPackagePrefixes: mutable.Set[String] = mutable.Set.empty
 
   private type RefType = ResolvedReferenceTypeDeclaration
 
@@ -48,15 +44,13 @@ class JdkJarTypeSolver extends TypeSolver {
   }
 
   private def lookupType(javaParserName: String): SymbolReference[ResolvedReferenceTypeDeclaration] = {
-    val name = convertJavaParserNameToStandard(javaParserName)
-    Try(classPool.get(name)) match {
-      case Success(ctClass) =>
+    possibleStandardNamesForJavaParser(javaParserName).iterator
+      .map(name => Try(classPool.get(name)))
+      .collectFirst { case Success(ctClass) =>
         val refType = ctClassToRefType(ctClass)
         refTypeToSymbolReference(refType)
-
-      case Failure(e) =>
-        SymbolReference.unsolved()
-    }
+      }
+      .getOrElse(SymbolReference.unsolved())
   }
 
   override def solveType(name: String): ResolvedReferenceTypeDeclaration = {
@@ -75,6 +69,17 @@ class JdkJarTypeSolver extends TypeSolver {
   private def refTypeToSymbolReference(refType: RefType): SymbolReference[RefType] = {
     SymbolReference.solved[RefType, RefType](refType)
   }
+}
+
+class JdkJarTypeSolverBuilder {
+
+  private val logger                                    = LoggerFactory.getLogger(this.getClass)
+  private val classPool                                 = new NonCachingClassPool()
+  private val knownPackagePrefixes: mutable.Set[String] = mutable.Set.empty
+
+  def build: JdkJarTypeSolver = {
+    new JdkJarTypeSolver(classPool, knownPackagePrefixes.toSet)
+  }
 
   private def addPathToClassPool(archivePath: String): Try[ClassPath] = {
     if (archivePath.isJarPath) {
@@ -87,12 +92,12 @@ class JdkJarTypeSolver extends TypeSolver {
     }
   }
 
-  def withJars(archivePaths: Seq[String]): JdkJarTypeSolver = {
+  def withJars(archivePaths: Seq[String]): JdkJarTypeSolverBuilder = {
     addArchives(archivePaths)
     this
   }
 
-  def addArchives(archivePaths: Seq[String]): Unit = {
+  private def addArchives(archivePaths: Seq[String]): Unit = {
     archivePaths.foreach { archivePath =>
       addPathToClassPool(archivePath) match {
         case Success(_) => registerPackagesForJar(archivePath)
@@ -123,22 +128,34 @@ class JdkJarTypeSolver extends TypeSolver {
 }
 
 object JdkJarTypeSolver {
-  val ClassExtension: String  = ".class"
-  val JmodClassPrefix: String = "classes/"
-  val JarExtension: String    = ".jar"
-  val JmodExtension: String   = ".jmod"
+  val ClassExtension: String                                      = ".class"
+  val JmodClassPrefix: String                                     = "classes/"
+  val JarExtension: String                                        = ".jar"
+  val JmodExtension: String                                       = ".jmod"
+  private val cache: mutable.Map[String, JdkJarTypeSolverBuilder] = mutable.Map.empty
 
   extension (path: String) {
     def isJarPath: Boolean  = path.endsWith(JarExtension)
     def isJmodPath: Boolean = path.endsWith(JmodExtension)
   }
 
-  def fromJdkPath(jdkPath: String): JdkJarTypeSolver = {
-    val jarPaths = SourceFiles.determine(jdkPath, Set(JarExtension, JmodExtension))
+  private def determineJarPaths(jdkPath: String): List[String] = {
+    // not following symlinks, because some setups might have a loop, e.g. AWS's Corretto
+    // see https://github.com/joernio/joern/pull/3871
+    val jarPaths = SourceFiles.determine(jdkPath, Set(JarExtension, JmodExtension))(VisitOptions.default)
     if (jarPaths.isEmpty) {
       throw new IllegalArgumentException(s"No .jar or .jmod files found at JDK path ${jdkPath}")
     }
-    new JdkJarTypeSolver().withJars(jarPaths)
+    jarPaths
+  }
+
+  def fromJdkPath(jdkPath: String, useCache: Boolean = false): JdkJarTypeSolver = {
+    def createBuilder = new JdkJarTypeSolverBuilder().withJars(determineJarPaths(jdkPath))
+    if (useCache) {
+      cache.getOrElseUpdate(jdkPath, createBuilder).build
+    } else {
+      createBuilder.build
+    }
   }
 
   /** Convert JavaParser class name foo.bar.qux.Baz to package prefix foo.bar Only use first 2 parts since this is
@@ -165,37 +182,23 @@ object JdkJarTypeSolver {
     packagePrefixForJarEntry(entryName.stripPrefix(JmodClassPrefix))
   }
 
-  /** A name is assumed to contain at least one subclass (e.g. ...Foo$Bar) if the last name part starts with a digit, or
-    * if the last 2 name parts start with capital letters. This heuristic is based on the class name format in the JDK
-    * jars, where names with subclasses have one of the forms:
-    *   - java.lang.ClassLoader$2
-    *   - java.lang.ClassLoader$NativeLibrary
-    *   - java.lang.ClassLoader$NativeLibrary$Unloader
+  /** JavaParser replaces the `$` in nested class names with a `.`. This means that we cannot know what the standard
+    * type full name is for JavaParser names with multiple parts, so this method returns all possibilities, for example
+    * for a.b.Foo.Bar, it will return:
+    *   - a.b.Foo.Bar
+    *   - a.b.Foo$Bar
+    *   - a.b$Foo$Bar
+    *   - a$b$Foo$Bar
     */
-  private def namePartsContainSubclass(nameParts: Array[String]): Boolean = {
-    nameParts.takeRight(2) match {
-      case Array() => false
+  def possibleStandardNamesForJavaParser(javaParserName: String): List[String] = {
+    val nameParts = javaParserName.split('.')
+    nameParts.indices.reverse.map { packageLength =>
+      val packageName = nameParts.take(packageLength).mkString(".")
+      val className   = nameParts.drop(packageLength).mkString("$")
 
-      case Array(singlePart) => false
+      val packagePrefix = if (packageLength > 0) s"$packageName." else ""
 
-      case Array(secondLast, last) =>
-        last.head.isDigit || (secondLast.head.isUpper && last.head.isUpper)
-    }
-  }
-
-  /** JavaParser replaces the `$` in nested class names with a `.`. This method converts the JavaParser names to the
-    * standard format by replacing the `.` between name parts that start with a capital letter or a digit with a `$`
-    * since the jdk classes follow the standard practice of capitalising the first letter in class names but not package
-    * names.
-    */
-  def convertJavaParserNameToStandard(className: String): String = {
-    className.split(".") match {
-      case nameParts if namePartsContainSubclass(nameParts) =>
-        val (packagePrefix, classNames) = nameParts.partition(_.head.isLower)
-        s"${packagePrefix.mkString(".")}.${classNames.mkString("$")}"
-
-      case _ => className
-    }
-
+      s"$packagePrefix$className"
+    }.toList
   }
 }

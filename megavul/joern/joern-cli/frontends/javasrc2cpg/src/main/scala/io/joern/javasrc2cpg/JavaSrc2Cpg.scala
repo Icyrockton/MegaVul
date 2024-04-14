@@ -5,7 +5,7 @@ import io.joern.javasrc2cpg.passes.{
   AstCreationPass,
   ConfigFileCreationPass,
   JavaTypeHintCallLinker,
-  JavaTypeRecoveryPass,
+  JavaTypeRecoveryPassGenerator,
   TypeInferencePass
 }
 import io.joern.x2cpg.X2Cpg.withNewEmptyCpg
@@ -30,6 +30,7 @@ class JavaSrc2Cpg extends X2CpgFrontend[Config] {
       new MetaDataPass(cpg, language, config.inputPath).createAndApply()
       val astCreationPass = new AstCreationPass(config, cpg)
       astCreationPass.createAndApply()
+      astCreationPass.sourceParser.cleanupDelombokOutput()
       new ConfigFileCreationPass(cpg).createAndApply()
       if (!config.skipTypeInfPass) {
         TypeNodePass.withRegisteredTypes(astCreationPass.global.usedTypes.keys().asScala.toList, cpg).createAndApply()
@@ -56,10 +57,9 @@ object JavaSrc2Cpg {
   def apply(): JavaSrc2Cpg = new JavaSrc2Cpg()
 
   def typeRecoveryPasses(cpg: Cpg, config: Option[Config] = None): List[CpgPassBase] = {
-    List(
-      new JavaTypeRecoveryPass(cpg, XTypeRecoveryConfig(enabledDummyTypes = !config.exists(_.disableDummyTypes))),
-      new JavaTypeHintCallLinker(cpg)
-    )
+    new JavaTypeRecoveryPassGenerator(cpg, XTypeRecoveryConfig(enabledDummyTypes = !config.exists(_.disableDummyTypes)))
+      .generate() ++
+      List(new JavaTypeHintCallLinker(cpg))
   }
 
   def showEnv(): Unit = {
@@ -77,6 +77,11 @@ object JavaSrc2Cpg {
         extends JavaSrcEnvVar(
           "JAVASRC_JDK_PATH",
           "Path to the JDK home used for retrieving type information about builtin Java types."
+        )
+    case FetchDependencies
+        extends JavaSrcEnvVar(
+          "JAVASRC_FETCH_DEPENDENCIES",
+          "If set, javasrc2cpg will fetch dependencies regardless of the --fetch-dependencies flag."
         )
   }
 }

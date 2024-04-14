@@ -7,9 +7,10 @@ import io.joern.jssrc2cpg.parser.BabelJsonParser.ParseResult
 import io.joern.jssrc2cpg.parser.BabelNodeInfo
 import io.joern.jssrc2cpg.passes.Defines
 import io.joern.x2cpg.datastructures.Stack.*
-import io.joern.x2cpg.utils.NodeBuilders.newMethodReturnNode
+import io.joern.x2cpg.utils.NodeBuilders.{newMethodReturnNode, newModifierNode}
 import io.joern.x2cpg.{Ast, AstCreatorBase, ValidationMode, AstNodeBuilder as X2CpgAstNodeBuilder}
-import io.shiftleft.codepropertygraph.generated.{EvaluationStrategies, NodeTypes}
+import io.joern.x2cpg.datastructures.Global
+import io.shiftleft.codepropertygraph.generated.{EvaluationStrategies, ModifierTypes, NodeTypes}
 import io.shiftleft.codepropertygraph.generated.nodes.NewBlock
 import io.shiftleft.codepropertygraph.generated.nodes.NewFile
 import io.shiftleft.codepropertygraph.generated.nodes.NewMethod
@@ -20,15 +21,11 @@ import org.slf4j.{Logger, LoggerFactory}
 import overflowdb.BatchedUpdate.DiffGraphBuilder
 import ujson.Value
 
-import java.util.concurrent.ConcurrentHashMap
 import scala.collection.mutable
 
-class AstCreator(
-  val config: Config,
-  val parserResult: ParseResult,
-  val usedTypes: ConcurrentHashMap[(String, String), Boolean]
-)(implicit withSchemaValidation: ValidationMode)
-    extends AstCreatorBase(parserResult.filename)
+class AstCreator(val config: Config, val global: Global, val parserResult: ParseResult)(implicit
+  withSchemaValidation: ValidationMode
+) extends AstCreatorBase(parserResult.filename)
     with AstForExpressionsCreator
     with AstForPrimitivesCreator
     with AstForTypesCreator
@@ -53,7 +50,6 @@ class AstCreator(
   protected val dynamicInstanceTypeStack      = new Stack[String]
   protected val localAstParentStack           = new Stack[NewBlock]()
   protected val rootTypeDecl                  = new Stack[NewTypeDecl]()
-  protected val typeFullNameToPostfix         = mutable.HashMap.empty[String, Int]
   protected val functionNodeToNameAndFullName = mutable.HashMap.empty[BabelNodeInfo, (String, String)]
   protected val usedVariableNames             = mutable.HashMap.empty[String, Int]
   protected val seenAliasTypes                = mutable.HashSet.empty[NewTypeDecl]
@@ -65,7 +61,9 @@ class AstCreator(
     positionLookupTables(parserResult.fileContent)
 
   override def createAst(): DiffGraphBuilder = {
-    val fileNode       = NewFile().name(parserResult.filename).order(1)
+    val fileContent = if (!config.disableFileContent) Option(parserResult.fileContent) else None
+    val fileNode    = NewFile().name(parserResult.filename).order(0)
+    fileContent.foreach(fileNode.content(_))
     val namespaceBlock = globalNamespaceBlock()
     methodAstParentStack.push(namespaceBlock)
     val ast = Ast(fileNode).withChild(Ast(namespaceBlock).withChild(createProgramMethod()))
@@ -124,7 +122,13 @@ class AstCreator(
     methodAstParentStack.pop()
 
     functionTypeAndTypeDeclAst.withChild(
-      methodAst(programMethod, List(Ast(thisParam)), blockAst(blockNode, methodChildren), methodReturn)
+      methodAst(
+        programMethod,
+        Ast(thisParam) :: Nil,
+        blockAst(blockNode, methodChildren),
+        methodReturn,
+        newModifierNode(ModifierTypes.MODULE) :: Nil
+      )
     )
   }
 
@@ -253,4 +257,20 @@ class AstCreator(
   protected def column(node: BabelNodeInfo): Option[Integer]    = node.columnNumber
   protected def lineEnd(node: BabelNodeInfo): Option[Integer]   = node.lineNumberEnd
   protected def columnEnd(node: BabelNodeInfo): Option[Integer] = node.columnNumberEnd
+  protected def code(node: BabelNodeInfo): String               = node.code
+
+  protected def nodeOffsets(node: Value): Option[(Int, Int)] = {
+    for {
+      startOffset <- start(node)
+      endOffset   <- end(node)
+    } yield (math.max(startOffset, 0), math.min(endOffset, parserResult.fileContent.length))
+  }
+
+  override protected def offset(node: BabelNodeInfo): Option[(Int, Int)] = {
+    Option
+      .when(!config.disableFileContent) {
+        nodeOffsets(node.json)
+      }
+      .flatten
+  }
 }

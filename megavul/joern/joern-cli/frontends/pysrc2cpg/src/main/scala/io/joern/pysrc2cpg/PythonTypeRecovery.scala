@@ -5,27 +5,28 @@ import io.shiftleft.codepropertygraph.Cpg
 import io.shiftleft.codepropertygraph.generated.nodes.*
 import io.shiftleft.codepropertygraph.generated.{Operators, PropertyNames}
 import io.shiftleft.semanticcpg.language.*
+import io.shiftleft.semanticcpg.language.importresolver.*
 import io.shiftleft.semanticcpg.language.operatorextension.OpNodes
 import io.shiftleft.semanticcpg.language.operatorextension.OpNodes.FieldAccess
 import overflowdb.BatchedUpdate.DiffGraphBuilder
 
-class PythonTypeRecoveryPass(cpg: Cpg, config: XTypeRecoveryConfig = XTypeRecoveryConfig())
-    extends XTypeRecoveryPass[File](cpg, config) {
+class PythonTypeRecoveryPassGenerator(cpg: Cpg, config: XTypeRecoveryConfig = XTypeRecoveryConfig())
+    extends XTypeRecoveryPassGenerator[File](cpg, config) {
 
-  override protected def generateRecoveryPass(state: XTypeRecoveryState): XTypeRecovery[File] =
-    new PythonTypeRecovery(cpg, state)
+  override protected def generateRecoveryPass(state: XTypeRecoveryState, iteration: Int): XTypeRecovery[File] =
+    new PythonTypeRecovery(cpg, state, iteration)
 }
 
-private class PythonTypeRecovery(cpg: Cpg, state: XTypeRecoveryState) extends XTypeRecovery[File](cpg, state) {
+private class PythonTypeRecovery(cpg: Cpg, state: XTypeRecoveryState, iteration: Int)
+    extends XTypeRecovery[File](cpg, state, iteration) {
 
-  override def compilationUnit: Iterator[File] = cpg.file.iterator
+  override def compilationUnits: Iterator[File] = cpg.file.iterator
 
   override def generateRecoveryForCompilationUnitTask(
     unit: File,
     builder: DiffGraphBuilder
   ): RecoverForXCompilationUnit[File] = {
-    val newConfig = state.config.copy(enabledDummyTypes = state.isFinalIteration && state.config.enabledDummyTypes)
-    new RecoverForPythonFile(cpg, unit, builder, state.copy(config = newConfig))
+    new RecoverForPythonFile(cpg, unit, builder, state)
   }
 
 }
@@ -38,20 +39,17 @@ private class RecoverForPythonFile(cpg: Cpg, cu: File, builder: DiffGraphBuilder
   /** Replaces the `this` prefix with the Pythonic `self` prefix for instance methods of functions local to this
     * compilation unit.
     */
-  private def fromNodeToLocalPythonKey(node: AstNode): Option[LocalKey] =
+  override protected def fromNodeToLocalKey(node: AstNode): Option[LocalKey] =
     node match {
       case n: Method => Option(CallAlias(n.name, Option("self")))
       case _         => SBKey.fromNodeToLocalKey(node)
     }
 
-  override val symbolTable: SymbolTable[LocalKey] = new SymbolTable[LocalKey](fromNodeToLocalPythonKey)
-
   override def visitImport(i: Import): Unit = {
     if (i.importedAs.isDefined && i.importedEntity.isDefined) {
-      import io.joern.x2cpg.passes.frontend.ImportsPass._
 
       val entityName = i.importedAs.get
-      i.call.tag.flatMap(ResolvedImport.tagToResolvedImport).foreach {
+      i.call.tag.flatMap(EvaluatedImport.tagToEvaluatedImport).foreach {
         case ResolvedMethod(fullName, alias, receiver, _) => symbolTable.put(CallAlias(alias, receiver), fullName)
         case ResolvedTypeDecl(fullName, _)                => symbolTable.put(LocalVar(entityName), fullName)
         case ResolvedMember(basePath, memberName, _) =>
@@ -97,27 +95,17 @@ private class RecoverForPythonFile(cpg: Cpg, cu: File, builder: DiffGraphBuilder
 
   /** If the parent method is module then it can be used as a field.
     */
-  override def isField(i: Identifier): Boolean =
-    state.isFieldCache.getOrElseUpdate(i.id(), i.method.name.matches("(<module>|__init__)") || super.isField(i))
+  override def isFieldUncached(i: Identifier): Boolean =
+    i.method.name.matches("(<module>|__init__)") || super.isFieldUncached(i)
 
   override def visitIdentifierAssignedToOperator(i: Identifier, c: Call, operation: String): Set[String] = {
     operation match {
-      case "<operator>.listLiteral"  => associateTypes(i, Set(s"${PythonAstVisitor.builtinPrefix}list"))
-      case "<operator>.tupleLiteral" => associateTypes(i, Set(s"${PythonAstVisitor.builtinPrefix}tuple"))
-      case "<operator>.dictLiteral"  => associateTypes(i, Set(s"${PythonAstVisitor.builtinPrefix}dict"))
-      case "<operator>.setLiteral"   => associateTypes(i, Set(s"${PythonAstVisitor.builtinPrefix}set"))
-      case Operators.conditional     => associateTypes(i, Set(s"${PythonAstVisitor.builtinPrefix}bool"))
+      case "<operator>.listLiteral"  => associateTypes(i, Set(s"${Constants.builtinPrefix}list"))
+      case "<operator>.tupleLiteral" => associateTypes(i, Set(s"${Constants.builtinPrefix}tuple"))
+      case "<operator>.dictLiteral"  => associateTypes(i, Set(s"${Constants.builtinPrefix}dict"))
+      case "<operator>.setLiteral"   => associateTypes(i, Set(s"${Constants.builtinPrefix}set"))
+      case Operators.conditional     => associateTypes(i, Set(s"${Constants.builtinPrefix}bool"))
       case _                         => super.visitIdentifierAssignedToOperator(i, c, operation)
-    }
-  }
-
-  override def visitStatementsInBlock(b: Block, assignmentTarget: Option[Identifier]): Set[String] = {
-    if (b.inAssignment.nonEmpty && b.expressionDown.assignment.argument(1).fieldAccess.code("<module>.*").nonEmpty) {
-      super.visitStatementsInBlock(b, assignmentTarget)
-      // Shortcut the actual value of the module access
-      visitAssignmentArguments(List(b.inAssignment.target.head, b.expressionDown.assignment.head.source))
-    } else {
-      super.visitStatementsInBlock(b, assignmentTarget)
     }
   }
 
@@ -138,7 +126,7 @@ private class RecoverForPythonFile(cpg: Cpg, cu: File, builder: DiffGraphBuilder
     val fieldParents = getFieldParents(fa)
     fa.astChildren.l match {
       case List(base: Identifier, fi: FieldIdentifier) if base.name.equals("self") && fieldParents.nonEmpty =>
-        val referencedFields = cpg.typeDecl.fullNameExact(fieldParents.toSeq: _*).member.nameExact(fi.canonicalName)
+        val referencedFields = cpg.typeDecl.fullNameExact(fieldParents.toSeq*).member.nameExact(fi.canonicalName)
         val globalTypes =
           referencedFields.flatMap(m => m.typeFullName +: m.dynamicTypeHintFullName).filterNot(_ == Constants.ANY).toSet
         associateTypes(i, globalTypes)
@@ -147,10 +135,10 @@ private class RecoverForPythonFile(cpg: Cpg, cu: File, builder: DiffGraphBuilder
   }
 
   override def getTypesFromCall(c: Call): Set[String] = c.name match {
-    case "<operator>.listLiteral"  => Set(s"${PythonAstVisitor.builtinPrefix}list")
-    case "<operator>.tupleLiteral" => Set(s"${PythonAstVisitor.builtinPrefix}tuple")
-    case "<operator>.dictLiteral"  => Set(s"${PythonAstVisitor.builtinPrefix}dict")
-    case "<operator>.setLiteral"   => Set(s"${PythonAstVisitor.builtinPrefix}set")
+    case "<operator>.listLiteral"  => Set(s"${Constants.builtinPrefix}list")
+    case "<operator>.tupleLiteral" => Set(s"${Constants.builtinPrefix}tuple")
+    case "<operator>.dictLiteral"  => Set(s"${Constants.builtinPrefix}dict")
+    case "<operator>.setLiteral"   => Set(s"${Constants.builtinPrefix}set")
     case _                         => super.getTypesFromCall(c)
   }
 
@@ -159,7 +147,7 @@ private class RecoverForPythonFile(cpg: Cpg, cu: File, builder: DiffGraphBuilder
       Set(fa.method.fullName)
     } else if (fa.method.typeDecl.nonEmpty) {
       val parentTypes       = fa.method.typeDecl.fullName.toSet
-      val baseTypeFullNames = cpg.typeDecl.fullNameExact(parentTypes.toSeq: _*).inheritsFromTypeFullName.toSet
+      val baseTypeFullNames = cpg.typeDecl.fullNameExact(parentTypes.toSeq*).inheritsFromTypeFullName.toSet
       (parentTypes ++ baseTypeFullNames).filterNot(_.matches("(?i)(any|object)"))
     } else {
       super.getFieldParents(fa)
@@ -170,14 +158,16 @@ private class RecoverForPythonFile(cpg: Cpg, cu: File, builder: DiffGraphBuilder
     (s.startsWith("\"") || s.startsWith("'")) && (s.endsWith("\"") || s.endsWith("'"))
 
   override def getLiteralType(l: Literal): Set[String] = {
-    (l.code match {
-      case code if code.toIntOption.isDefined                  => Some(s"${PythonAstVisitor.builtinPrefix}int")
-      case code if code.toDoubleOption.isDefined               => Some(s"${PythonAstVisitor.builtinPrefix}float")
-      case code if "True".equals(code) || "False".equals(code) => Some(s"${PythonAstVisitor.builtinPrefix}bool")
-      case code if code.equals("None")                         => Some(s"${PythonAstVisitor.builtinPrefix}None")
-      case code if isPyString(code)                            => Some(s"${PythonAstVisitor.builtinPrefix}str")
+    val literalTypes = (l.code match {
+      case code if code.toIntOption.isDefined                  => Some(s"${Constants.builtinPrefix}int")
+      case code if code.toDoubleOption.isDefined               => Some(s"${Constants.builtinPrefix}float")
+      case code if "True".equals(code) || "False".equals(code) => Some(s"${Constants.builtinPrefix}bool")
+      case code if code.equals("None")                         => Some(s"${Constants.builtinPrefix}None")
+      case code if isPyString(code)                            => Some(s"${Constants.builtinPrefix}str")
       case _                                                   => None
     }).toSet
+    setTypes(l, literalTypes.toSeq)
+    literalTypes
   }
 
   override def createCallFromIdentifierTypeFullName(typeFullName: String, callName: String): String = {
@@ -187,7 +177,7 @@ private class RecoverForPythonFile(cpg: Cpg, cu: File, builder: DiffGraphBuilder
       case t if t.matches(".*\\.<(member|returnValue|indexAccess)>(\\(.*\\))?") =>
         super.createCallFromIdentifierTypeFullName(typeFullName, callName)
       case t if isConstructor(tName) =>
-        Seq(t, callName).mkString(pathSep.toString)
+        Seq(t, callName).mkString(pathSep)
       case _ => super.createCallFromIdentifierTypeFullName(typeFullName, callName)
     }
   }
@@ -200,7 +190,6 @@ private class RecoverForPythonFile(cpg: Cpg, cu: File, builder: DiffGraphBuilder
         val existingTypes = (identifierTypes ++ otherTypes).distinct
         val resolvedTypes = identifierTypes.map(LocalVar.apply).flatMap(symbolTable.get)
         if (existingTypes != resolvedTypes && resolvedTypes.nonEmpty) {
-          state.changesWereMade.compareAndExchange(false, true)
           builder.setNodeProperty(t, PropertyNames.INHERITS_FROM_TYPE_FULL_NAME, resolvedTypes)
         }
       }

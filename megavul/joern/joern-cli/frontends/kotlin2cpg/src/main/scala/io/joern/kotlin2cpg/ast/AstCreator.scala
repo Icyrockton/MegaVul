@@ -24,6 +24,7 @@ import scala.annotation.tailrec
 import scala.collection.mutable
 import io.shiftleft.semanticcpg.language.*
 
+import java.io.{PrintWriter, StringWriter}
 import scala.jdk.CollectionConverters.*
 
 case class BindingInfo(node: NewBinding, edgeMeta: Seq[(NewNode, NewNode, String)])
@@ -45,13 +46,13 @@ class AstCreator(fileWithMeta: KtFileWithMeta, xTypeInfoProvider: TypeInfoProvid
   protected val lambdaBindingInfoQueue: mutable.ArrayBuffer[BindingInfo]       = mutable.ArrayBuffer.empty
   protected val methodAstParentStack: Stack[NewNode]                           = new Stack()
 
-  protected val lambdaKeyPool   = new IntervalKeyPool(first = 1, last = Long.MaxValue)
   protected val tmpKeyPool      = new IntervalKeyPool(first = 1, last = Long.MaxValue)
   protected val iteratorKeyPool = new IntervalKeyPool(first = 1, last = Long.MaxValue)
 
   protected val relativizedPath: String = fileWithMeta.relativizedPath
 
   protected val scope: Scope[String, DeclarationNew, NewNode] = new Scope()
+  protected val debugScope                                    = mutable.Stack.empty[KtDeclaration]
 
   def createAst(): DiffGraphBuilder = {
     implicit val typeInfoProvider: TypeInfoProvider = xTypeInfoProvider
@@ -74,7 +75,10 @@ class AstCreator(fileWithMeta: KtFileWithMeta, xTypeInfoProvider: TypeInfoProvid
     typeName
   }
 
-  def line(element: PsiElement): Option[Integer] = {
+  // TODO: use this everywhere in kotlin2cpg instead of manual .getText calls
+  override def code(element: PsiElement): String = shortenCode(element.getText)
+
+  override def line(element: PsiElement): Option[Integer] = {
     try {
       Some(
         element.getContainingFile.getViewProvider.getDocument
@@ -85,7 +89,7 @@ class AstCreator(fileWithMeta: KtFileWithMeta, xTypeInfoProvider: TypeInfoProvid
     }
   }
 
-  def column(element: PsiElement): Option[Integer] = {
+  override def column(element: PsiElement): Option[Integer] = {
     try {
       val lineNumber =
         element.getContainingFile.getViewProvider.getDocument
@@ -98,7 +102,7 @@ class AstCreator(fileWithMeta: KtFileWithMeta, xTypeInfoProvider: TypeInfoProvid
     }
   }
 
-  def lineEnd(element: PsiElement): Option[Integer] = {
+  override def lineEnd(element: PsiElement): Option[Integer] = {
     val lastElement = element match {
       case namedFn: KtNamedFunction =>
         Option(namedFn.getBodyBlockExpression)
@@ -109,7 +113,7 @@ class AstCreator(fileWithMeta: KtFileWithMeta, xTypeInfoProvider: TypeInfoProvid
     line(lastElement)
   }
 
-  def columnEnd(element: PsiElement): Option[Integer] = {
+  override def columnEnd(element: PsiElement): Option[Integer] = {
     val lastElement = element match {
       case namedFn: KtNamedFunction =>
         Option(namedFn.getBodyBlockExpression)
@@ -168,6 +172,21 @@ class AstCreator(fileWithMeta: KtFileWithMeta, xTypeInfoProvider: TypeInfoProvid
       case Some(n) => Ast(srcNode).withRefEdge(srcNode, n)
       case None    => Ast(srcNode)
     }
+  }
+
+  private def logDebugWithTestAndStackTrace(message: String): Unit = {
+    val declString = debugScope.headOption.map(_.getText).getOrElse("Declaration scope empty")
+    logger.debug(message + "\nIn declaration:\n" + declString + "\nStack trace to declaration:" + getStackTrace)
+  }
+
+  private def getStackTrace: String = {
+    val stackTrace = Thread.currentThread().getStackTrace
+    var endIndex   = stackTrace.indexWhere(_.toString.contains("astsForDeclaration"))
+    if (endIndex == -1) {
+      endIndex = stackTrace.length
+    }
+    val partialStackTrace = stackTrace.slice(2, endIndex + 1)
+    partialStackTrace.mkString("\n\t", "\n\t", "")
   }
 
   @tailrec
@@ -243,7 +262,7 @@ class AstCreator(fileWithMeta: KtFileWithMeta, xTypeInfoProvider: TypeInfoProvid
         )
         Seq(astForUnknown(typedExpr, argIdxMaybe, argNameMaybe, annotations))
       case null =>
-        logger.trace("Received null expression! Skipping...")
+        logDebugWithTestAndStackTrace("Received null expression! Skipping...")
         Seq()
       // TODO: handle `KtCallableReferenceExpression` like `this::baseTerrain`
       case unknownExpr =>
@@ -311,21 +330,37 @@ class AstCreator(fileWithMeta: KtFileWithMeta, xTypeInfoProvider: TypeInfoProvid
   }
 
   def astsForDeclaration(decl: KtDeclaration)(implicit typeInfoProvider: TypeInfoProvider): Seq[Ast] = {
-    decl match {
-      case c: KtClass             => astsForClassOrObject(c)
-      case o: KtObjectDeclaration => astsForClassOrObject(o)
-      case n: KtNamedFunction =>
-        val isExtensionFn = typeInfoProvider.isExtensionFn(n)
-        astsForMethod(n, isExtensionFn)
-      case t: KtTypeAlias            => Seq(astForTypeAlias(t))
-      case s: KtSecondaryConstructor => Seq(astForUnknown(s, None, None))
-      case p: KtProperty             => astsForProperty(p)
-      case unhandled =>
-        logger.error(
-          s"Unknown declaration type encountered with text `${unhandled.getText}` and class `${unhandled.getClass}`!"
-        )
-        Seq()
-    }
+    debugScope.push(decl)
+    val result =
+      try {
+        decl match {
+          case c: KtClass             => astsForClassOrObject(c)
+          case o: KtObjectDeclaration => astsForClassOrObject(o)
+          case n: KtNamedFunction =>
+            val isExtensionFn = typeInfoProvider.isExtensionFn(n)
+            astsForMethod(n, isExtensionFn)
+          case t: KtTypeAlias            => Seq(astForTypeAlias(t))
+          case s: KtSecondaryConstructor => Seq(astForUnknown(s, None, None))
+          case p: KtProperty             => astsForProperty(p)
+          case unhandled =>
+            logger.error(
+              s"Unknown declaration type encountered in this file `${relativizedPath}` with text `${unhandled.getText}` and class `${unhandled.getClass}`!"
+            )
+            Seq()
+        }
+      } catch {
+        case exception: Exception =>
+          val declText     = decl.getText
+          val stringWriter = new StringWriter()
+          val printWriter  = new PrintWriter(stringWriter)
+          exception.printStackTrace(printWriter)
+          logger.warn(
+            s"Caught exception while processing decl in this file `${relativizedPath}`:\n$declText\n${stringWriter.toString}"
+          )
+          Seq()
+      }
+    debugScope.pop()
+    result
   }
 
   def astForUnknown(

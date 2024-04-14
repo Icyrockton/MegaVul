@@ -1,31 +1,43 @@
 package io.joern.php2cpg
 
 import io.joern.php2cpg.parser.PhpParser
-import io.joern.php2cpg.passes.{AnyTypePass, AstCreationPass, AstParentInfoPass, ClosureRefPass, LocalCreationPass}
+import io.joern.php2cpg.passes.{
+  AnyTypePass,
+  AstCreationPass,
+  AstParentInfoPass,
+  ClosureRefPass,
+  LocalCreationPass,
+  PhpTypeStubsParserPass,
+  PhpTypeRecoveryPassGenerator,
+  PhpTypeHintCallLinker
+}
 import io.joern.x2cpg.X2Cpg.withNewEmptyCpg
 import io.joern.x2cpg.X2CpgFrontend
-import io.joern.x2cpg.passes.frontend.{MetaDataPass, TypeNodePass}
+import io.joern.x2cpg.passes.frontend.{MetaDataPass, TypeNodePass, XTypeRecoveryConfig, XTypeStubsParserConfig}
 import io.joern.x2cpg.utils.ExternalCommand
 import io.shiftleft.codepropertygraph.Cpg
+import io.shiftleft.passes.CpgPassBase
 import io.shiftleft.codepropertygraph.generated.Languages
 import org.slf4j.LoggerFactory
 
 import scala.collection.mutable
-import scala.util.{Failure, Try, Success}
+import scala.util.{Failure, Success, Try}
 import scala.util.matching.Regex
 
 class Php2Cpg extends X2CpgFrontend[Config] {
+
   private val logger = LoggerFactory.getLogger(this.getClass)
 
+  // PHP 7.1.0 and above is required by Composer, which is used by PHP Parser
+  private val PhpVersionRegex = new Regex("^PHP ([78]\\.[1-9]\\.[0-9]|[9-9]\\d\\.\\d\\.\\d)")
+
   private def isPhpVersionSupported: Boolean = {
-    // PHP 7.1.0 and above is required by Composer, which is used by PHP Parser
-    val phpVersionRegex = new Regex("^PHP ([78]\\.[1-9]\\.[0-9]|[9-9]\\d\\.\\d\\.\\d)")
-    val result          = ExternalCommand.run("php --version", ".")
+    val result = ExternalCommand.run("php --version", ".")
     result match {
       case Success(listString) =>
         val phpVersionStr = listString.headOption.getOrElse("")
         logger.info(s"Checking PHP installation: $phpVersionStr")
-        val matchResult = phpVersionRegex.findFirstIn(phpVersionStr)
+        val matchResult = PhpVersionRegex.findFirstIn(phpVersionStr)
         matchResult.isDefined
       case Failure(exception) =>
         logger.error(s"Failed to run php --version: ${exception.getMessage}")
@@ -66,5 +78,21 @@ class Php2Cpg extends X2CpgFrontend[Config] {
       Failure(new RuntimeException("php not found or version not supported"))
     }
 
+  }
+}
+
+object Php2Cpg {
+
+  def postProcessingPasses(cpg: Cpg, config: Option[Config] = None): List[CpgPassBase] = {
+    val typeRecoveryConfig = config
+      .map(c => XTypeRecoveryConfig(c.typePropagationIterations, !c.disableDummyTypes))
+      .getOrElse(XTypeRecoveryConfig(iterations = 3))
+    val setKnownTypesConfig = config
+      .map(c => XTypeStubsParserConfig(c.typeStubsFilePath))
+      .getOrElse(XTypeStubsParserConfig())
+    List(new PhpTypeStubsParserPass(cpg, setKnownTypesConfig)) ++ new PhpTypeRecoveryPassGenerator(
+      cpg,
+      typeRecoveryConfig
+    ).generate() :+ PhpTypeHintCallLinker(cpg)
   }
 }

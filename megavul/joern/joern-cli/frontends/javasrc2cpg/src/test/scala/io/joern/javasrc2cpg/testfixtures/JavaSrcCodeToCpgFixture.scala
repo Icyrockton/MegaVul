@@ -1,14 +1,14 @@
 package io.joern.javasrc2cpg.testfixtures
 
-import io.joern.dataflowengineoss.layers.dataflows.{OssDataFlow, OssDataFlowOptions}
 import io.joern.dataflowengineoss.queryengine.EngineContext
+import io.joern.dataflowengineoss.semanticsloader.FlowSemantic
+import io.joern.dataflowengineoss.testfixtures.{SemanticCpgTestFixture, SemanticTestCpg}
 import io.joern.javasrc2cpg.{Config, JavaSrc2Cpg}
 import io.joern.x2cpg.X2Cpg
-import io.joern.x2cpg.testfixtures.{Code2CpgFixture, LanguageFrontend, TestCpg}
+import io.joern.x2cpg.testfixtures.{Code2CpgFixture, DefaultTestCpg, LanguageFrontend, TestCpg}
 import io.shiftleft.codepropertygraph.Cpg
 import io.shiftleft.codepropertygraph.generated.nodes.{Expression, Literal}
 import io.shiftleft.semanticcpg.language.*
-import io.shiftleft.semanticcpg.layers.LayerCreatorContext
 
 import java.io.File
 
@@ -16,36 +16,37 @@ trait JavaSrcFrontend extends LanguageFrontend {
   override val fileSuffix: String = ".java"
 
   override def execute(sourceCodeFile: File): Cpg = {
-    val config = getConfig().map(_.asInstanceOf[Config]).getOrElse(JavaSrc2Cpg.DefaultConfig)
+    val config = getConfig()
+      .map(_.asInstanceOf[Config])
+      .getOrElse(JavaSrc2Cpg.DefaultConfig.withDelombokMode("no-delombok"))
+      .withCacheJdkTypeSolver(true)
     new JavaSrc2Cpg().createCpg(sourceCodeFile.getAbsolutePath)(config).get
   }
 }
 
-class JavaSrcTestCpg(enableTypeRecovery: Boolean = false) extends TestCpg with JavaSrcFrontend {
-  private var _withOssDataflow = false
+class JavaSrcTestCpg(enableTypeRecovery: Boolean = false)
+    extends DefaultTestCpg
+    with JavaSrcFrontend
+    with SemanticTestCpg {
 
-  def withOssDataflow(value: Boolean = true): this.type = {
-    _withOssDataflow = value
-    this
-  }
-
-  override def applyPasses(): Unit = {
-    X2Cpg.applyDefaultOverlays(this)
+  override protected def applyPasses(): Unit = {
+    super.applyPasses()
     if (enableTypeRecovery) JavaSrc2Cpg.typeRecoveryPasses(this).foreach(_.createAndApply())
-    if (_withOssDataflow) {
-      val context = new LayerCreatorContext(this)
-      val options = new OssDataFlowOptions()
-      new OssDataFlow(options).run(context)
-    }
+    applyOssDataFlow()
   }
 
 }
 
-class JavaSrcCode2CpgFixture(withOssDataflow: Boolean = false, enableTypeRecovery: Boolean = false)
-    extends Code2CpgFixture(() => new JavaSrcTestCpg(enableTypeRecovery).withOssDataflow(withOssDataflow)) {
+class JavaSrcCode2CpgFixture(
+  withOssDataflow: Boolean = false,
+  extraFlows: List[FlowSemantic] = List.empty,
+  enableTypeRecovery: Boolean = false
+) extends Code2CpgFixture(() =>
+      new JavaSrcTestCpg(enableTypeRecovery).withOssDataflow(withOssDataflow).withExtraFlows(extraFlows)
+    )
+    with SemanticCpgTestFixture(extraFlows) {
 
-  implicit val resolver: ICallResolver           = NoResolve
-  implicit lazy val engineContext: EngineContext = EngineContext()
+  implicit val resolver: ICallResolver = NoResolve
 
   def getConstSourceSink(
     cpg: Cpg,

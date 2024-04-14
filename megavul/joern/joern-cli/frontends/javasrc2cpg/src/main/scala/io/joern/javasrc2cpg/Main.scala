@@ -20,7 +20,8 @@ final case class Config(
   jdkPath: Option[String] = None,
   showEnv: Boolean = false,
   skipTypeInfPass: Boolean = false,
-  dumpJavaparserAsts: Boolean = false
+  dumpJavaparserAsts: Boolean = false,
+  cacheJdkTypeSolver: Boolean = false
 ) extends X2CpgConfig[Config]
     with TypeRecoveryParserConfig[Config] {
   def withInferenceJarPaths(paths: Set[String]): Config = {
@@ -62,6 +63,10 @@ final case class Config(
   def withDumpJavaparserAsts(value: Boolean): Config = {
     copy(dumpJavaparserAsts = value).withInheritedFields(this)
   }
+
+  def withCacheJdkTypeSolver(value: Boolean): Config = {
+    copy(cacheJdkTypeSolver = value).withInheritedFields(this)
+  }
 }
 
 private object Frontend {
@@ -73,9 +78,9 @@ private object Frontend {
     import builder._
     OParser.sequence(
       programName("javasrc2cpg"),
-      opt[String]("inference-jar-paths")
-        .text(s"extra jars used only for type information")
-        .action((path, c) => c.withInferenceJarPaths(c.inferenceJarPaths + path)),
+      opt[Seq[String]]("inference-jar-paths")
+        .text(s"extra jars used only for type information (comma-separated list of paths)")
+        .action((paths, c) => c.withInferenceJarPaths(c.inferenceJarPaths ++ paths)),
       opt[Unit]("fetch-dependencies")
         .text("attempt to fetch dependencies jars for extra type information")
         .action((_, c) => c.withFetchDependencies(true)),
@@ -111,7 +116,11 @@ private object Frontend {
       opt[Unit]("dump-javaparser-asts")
         .hidden()
         .action((_, c) => c.withDumpJavaparserAsts(true))
-        .text("Dump the javaparser asts for the given input files and terminate (for debugging).")
+        .text("Dump the javaparser asts for the given input files and terminate (for debugging)."),
+      opt[Unit]("cache-jdk-type-solver")
+        .hidden()
+        .action((_, c) => c.withCacheJdkTypeSolver(true))
+        .text("Re-use JDK type solver between scans.")
     )
   }
 }

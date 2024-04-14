@@ -1,33 +1,38 @@
 package io.joern.rubysrc2cpg
 
 import better.files.File
-import io.joern.rubysrc2cpg.deprecated.astcreation.ResourceManagedParser
-import io.joern.rubysrc2cpg.deprecated.passes.*
-import io.joern.rubysrc2cpg.deprecated.utils.PackageTable
+import io.joern.rubysrc2cpg.astcreation.AstCreator
+import io.joern.rubysrc2cpg.datastructures.RubyProgramSummary
+import io.joern.rubysrc2cpg.deprecated.parser.DeprecatedRubyParser
+import io.joern.rubysrc2cpg.deprecated.parser.DeprecatedRubyParser.*
+import io.joern.rubysrc2cpg.parser.RubyParser
+import io.joern.rubysrc2cpg.passes.{AstCreationPass, ConfigFileCreationPass, DependencyPass, ImportsPass}
+import io.joern.rubysrc2cpg.utils.DependencyDownloader
 import io.joern.x2cpg.X2Cpg.withNewEmptyCpg
-import io.joern.x2cpg.X2CpgFrontend
-import io.joern.x2cpg.datastructures.Global
 import io.joern.x2cpg.passes.base.AstLinkerPass
 import io.joern.x2cpg.passes.callgraph.NaiveCallLinker
 import io.joern.x2cpg.passes.frontend.{MetaDataPass, TypeNodePass}
-import io.joern.x2cpg.utils.ExternalCommand
+import io.joern.x2cpg.utils.{ConcurrentTaskUtil, ExternalCommand}
+import io.joern.x2cpg.{SourceFiles, X2CpgFrontend}
 import io.shiftleft.codepropertygraph.Cpg
 import io.shiftleft.codepropertygraph.generated.Languages
 import io.shiftleft.passes.CpgPassBase
+import io.shiftleft.semanticcpg.language.*
 import org.slf4j.LoggerFactory
 
 import java.nio.file.{Files, Paths}
+import scala.util.matching.Regex
 import scala.util.{Failure, Success, Try, Using}
 
 class RubySrc2Cpg extends X2CpgFrontend[Config] {
 
-  val global         = new Global()
   private val logger = LoggerFactory.getLogger(this.getClass)
 
   override def createCpg(config: Config): Try[Cpg] = {
     withNewEmptyCpg(config.outputPath, config: Config) { (cpg, config) =>
       new MetaDataPass(cpg, Languages.RUBYSRC, config.inputPath).createAndApply()
       new ConfigFileCreationPass(cpg).createAndApply()
+      new DependencyPass(cpg).createAndApply()
       if (config.useDeprecatedFrontend) {
         deprecatedCreateCpgAction(cpg, config)
       } else {
@@ -37,26 +42,81 @@ class RubySrc2Cpg extends X2CpgFrontend[Config] {
   }
 
   private def newCreateCpgAction(cpg: Cpg, config: Config): Unit = {
-    // TODO
+    Using.resource(new parser.ResourceManagedParser(config.antlrCacheMemLimit)) { parser =>
+      val astCreators = ConcurrentTaskUtil
+        .runUsingThreadPool(RubySrc2Cpg.generateParserTasks(parser, config, cpg.metaData.root.headOption))
+        .flatMap {
+          case Failure(exception)  => logger.warn(s"Could not parse file, skipping - ", exception); None
+          case Success(astCreator) => Option(astCreator)
+        }
+      // Pre-parse the AST creators for high level structures
+      val internalProgramSummary = ConcurrentTaskUtil
+        .runUsingThreadPool(astCreators.map(x => () => x.summarize()).iterator)
+        .flatMap {
+          case Failure(exception) => logger.warn(s"Unable to pre-parse Ruby file, skipping - ", exception); None
+          case Success(summary)   => Option(summary)
+        }
+        .reduceOption((a, b) => a ++ b)
+        .getOrElse(RubyProgramSummary())
+
+      val programSummary = if (config.downloadDependencies) {
+        DependencyDownloader(cpg, internalProgramSummary).download()
+      } else {
+        internalProgramSummary
+      }
+
+      val astCreationPass = new AstCreationPass(cpg, astCreators.map(_.withSummary(programSummary)))
+      astCreationPass.createAndApply()
+      val importsPass = new ImportsPass(cpg)
+      importsPass.createAndApply()
+      TypeNodePass.withTypesFromCpg(cpg).createAndApply()
+    }
   }
 
-  private def deprecatedCreateCpgAction(cpg: Cpg, config: Config): Unit = {
-    Using.resource(new ResourceManagedParser(config.antlrCacheMemLimit)) { parser =>
-      if (config.enableDependencyDownload && !scala.util.Properties.isWin) {
+  private def deprecatedCreateCpgAction(cpg: Cpg, config: Config): Unit = try {
+    Using.resource(new deprecated.astcreation.ResourceManagedParser(config.antlrCacheMemLimit)) { parser =>
+      if (config.downloadDependencies && !scala.util.Properties.isWin) {
         val tempDir = File.newTemporaryDirectory()
         try {
           downloadDependency(config.inputPath, tempDir.toString())
-          new AstPackagePass(cpg, tempDir.toString(), global, parser, RubySrc2Cpg.packageTableInfo, config.inputPath)(
-            config.schemaValidation
-          ).createAndApply()
+          new deprecated.passes.AstPackagePass(
+            cpg,
+            tempDir.toString(),
+            parser,
+            RubySrc2Cpg.packageTableInfo,
+            config.inputPath
+          )(config.schemaValidation).createAndApply()
         } finally {
           tempDir.delete()
         }
       }
-      val astCreationPass = new AstCreationPass(cpg, global, parser, RubySrc2Cpg.packageTableInfo, config)
+      val parsedFiles = {
+        val tasks = SourceFiles
+          .determine(
+            config.inputPath,
+            RubySrc2Cpg.RubySourceFileExtensions,
+            ignoredFilesRegex = Option(config.ignoredFilesRegex),
+            ignoredFilesPath = Option(config.ignoredFiles)
+          )
+          .map(x =>
+            () =>
+              parser.parse(x) match
+                case Failure(exception) =>
+                  logger.warn(s"Could not parse file: $x, skipping", exception); throw exception
+                case Success(ast) => x -> ast
+          )
+          .iterator
+        ConcurrentTaskUtil.runUsingThreadPool(tasks).flatMap(_.toOption)
+      }
+
+      new io.joern.rubysrc2cpg.deprecated.ParseInternalStructures(parsedFiles, cpg.metaData.root.headOption)
+        .populatePackageTable()
+      val astCreationPass =
+        new deprecated.passes.AstCreationPass(cpg, parsedFiles, RubySrc2Cpg.packageTableInfo, config)
       astCreationPass.createAndApply()
-      TypeNodePass.withRegisteredTypes(astCreationPass.allUsedTypes(), cpg).createAndApply()
     }
+  } finally {
+    RubySrc2Cpg.packageTableInfo.clear()
   }
 
   private def downloadDependency(inputPath: String, tempPath: String): Unit = {
@@ -80,25 +140,46 @@ class RubySrc2Cpg extends X2CpgFrontend[Config] {
 
 object RubySrc2Cpg {
 
-  val packageTableInfo = new PackageTable()
+  // TODO: Global mutable state is bad and should be avoided in the next iteration of the Ruby frontend
+  val packageTableInfo                              = new deprecated.utils.PackageTable()
+  private val RubySourceFileExtensions: Set[String] = Set(".rb")
 
   def postProcessingPasses(cpg: Cpg, config: Config): List[CpgPassBase] = {
     if (config.useDeprecatedFrontend) {
-      List(
-        // TODO commented below two passes, as waiting on Dependency download PR to get merged
-        new IdentifierToCallPass(cpg),
-        new ImportResolverPass(cpg, packageTableInfo),
-        new RubyTypeRecoveryPass(cpg),
-        new RubyTypeHintCallLinker(cpg),
-        new NaiveCallLinker(cpg),
+      List(new deprecated.passes.RubyImportResolverPass(cpg, packageTableInfo))
+        ++ new deprecated.passes.RubyTypeRecoveryPassGenerator(cpg).generate() ++ List(
+          new deprecated.passes.RubyTypeHintCallLinker(cpg),
+          new NaiveCallLinker(cpg),
 
-        // Some of passes above create new methods, so, we
-        // need to run the ASTLinkerPass one more time
-        new AstLinkerPass(cpg)
-      )
+          // Some of passes above create new methods, so, we
+          // need to run the ASTLinkerPass one more time
+          new AstLinkerPass(cpg)
+        )
     } else {
       List()
     }
+  }
+
+  def generateParserTasks(
+    resourceManagedParser: parser.ResourceManagedParser,
+    config: Config,
+    projectRoot: Option[String]
+  ): Iterator[() => AstCreator] = {
+    SourceFiles
+      .determine(
+        config.inputPath,
+        RubySourceFileExtensions,
+        ignoredDefaultRegex = Option(config.defaultIgnoredFilesRegex),
+        ignoredFilesRegex = Option(config.ignoredFilesRegex),
+        ignoredFilesPath = Option(config.ignoredFiles)
+      )
+      .map { fileName => () =>
+        resourceManagedParser.parse(fileName) match {
+          case Failure(exception) => throw exception
+          case Success(ctx)       => new AstCreator(fileName, ctx, projectRoot)(config.schemaValidation)
+        }
+      }
+      .iterator
   }
 
 }

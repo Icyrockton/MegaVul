@@ -1,11 +1,13 @@
 package io.joern.pysrc2cpg
 
-import io.joern.pysrc2cpg.PythonAstVisitor.{builtinPrefix, metaClassSuffix}
+import PythonAstVisitor.{logger, metaClassSuffix, noLineAndColumn}
 import io.joern.pysrc2cpg.memop.*
+import io.joern.pysrc2cpg.Constants.builtinPrefix
 import io.joern.pythonparser.ast
-import io.joern.x2cpg.ValidationMode
+import io.joern.x2cpg.{AstCreatorBase, ValidationMode}
 import io.shiftleft.codepropertygraph.generated.*
-import io.shiftleft.codepropertygraph.generated.nodes.{NewMethod, NewNode, NewTypeDecl}
+import io.shiftleft.codepropertygraph.generated.nodes.{NewNode, NewTypeDecl}
+import org.slf4j.LoggerFactory
 import overflowdb.BatchedUpdate.DiffGraphBuilder
 
 import scala.collection.mutable
@@ -22,9 +24,14 @@ object PythonV2      extends PythonVersion
 object PythonV3      extends PythonVersion
 object PythonV2AndV3 extends PythonVersion
 
-class PythonAstVisitor(relFileName: String, protected val nodeToCode: NodeToCode, version: PythonVersion)(implicit
-  withSchemaValidation: ValidationMode
-) extends PythonAstVisitorHelpers {
+class PythonAstVisitor(
+  relFileName: String,
+  protected val nodeToCode: NodeToCode,
+  version: PythonVersion,
+  enableFileContent: Boolean
+)(implicit withSchemaValidation: ValidationMode)
+    extends AstCreatorBase(relFileName)
+    with PythonAstVisitorHelpers {
 
   private val diffGraph     = new DiffGraphBuilder()
   protected val nodeBuilder = new NodeBuilder(diffGraph)
@@ -32,7 +39,7 @@ class PythonAstVisitor(relFileName: String, protected val nodeToCode: NodeToCode
 
   protected val contextStack = new ContextStack()
 
-  protected var memOpMap: AstNodeToMemoryOperationMap = _
+  private var memOpMap: AstNodeToMemoryOperationMap = scala.compiletime.uninitialized
 
   private val members = mutable.Map.empty[NewTypeDecl, List[String]]
 
@@ -40,9 +47,7 @@ class PythonAstVisitor(relFileName: String, protected val nodeToCode: NodeToCode
   // is no more specific type than ast.istmt.
   private val functionDefToMethod = mutable.Map.empty[ast.istmt, nodes.NewMethod]
 
-  def getDiffGraph: DiffGraphBuilder = {
-    diffGraph
-  }
+  override def createAst(): DiffGraphBuilder = diffGraph
 
   private def createIdentifierLinks(): Unit = {
     contextStack.createIdentifierLinks(
@@ -72,7 +77,12 @@ class PythonAstVisitor(relFileName: String, protected val nodeToCode: NodeToCode
     module.accept(memOpCalculator)
     memOpMap = memOpCalculator.astNodeToMemOp
 
-    val fileNode = nodeBuilder.fileNode(relFileName)
+    val contentOption = if (enableFileContent) {
+      Some(nodeToCode.content)
+    } else {
+      None
+    }
+    val fileNode = nodeBuilder.fileNode(relFileName, contentOption)
     val namespaceBlockNode =
       nodeBuilder.namespaceBlockNode(
         Constants.GLOBAL_NAMESPACE,
@@ -88,24 +98,24 @@ class PythonAstVisitor(relFileName: String, protected val nodeToCode: NodeToCode
     val lastLineAndCol  = module.stmts.lastOption.map(lineAndColOf)
     val line            = firstLineAndCol.map(_.line).getOrElse(1)
     val column          = firstLineAndCol.map(_.column).getOrElse(1)
+    val offset          = firstLineAndCol.map(_.offset).getOrElse(1)
     val endLine         = lastLineAndCol.map(_.endLine).getOrElse(1)
     val endColumn       = lastLineAndCol.map(_.endColumn).getOrElse(1)
+    val endOffset       = lastLineAndCol.map(_.endOffset).getOrElse(1)
 
     val moduleMethodNode =
       createMethod(
         "<module>",
         methodFullName,
         Some("<module>"),
+        ModifierTypes.VIRTUAL :: ModifierTypes.MODULE :: Nil,
         parameterProvider = () => MethodParameters.empty(),
-        bodyProvider = () =>
-          createBuiltinIdentifiers(memOpCalculator.names)
-            ++ createModuleIdentifier(methodFullName)
-            ++ module.stmts.map(convert),
+        bodyProvider = () => createBuiltinIdentifiers(memOpCalculator.names) ++ module.stmts.map(convert),
         returns = None,
         isAsync = false,
         methodRefNode = None,
         returnTypeHint = None,
-        LineAndColumn(line, column, endLine, endColumn)
+        LineAndColumn(line, column, endLine, endColumn, offset, endOffset)
       )
 
     createIdentifierLinks()
@@ -124,7 +134,7 @@ class PythonAstVisitor(relFileName: String, protected val nodeToCode: NodeToCode
   // artificially created during lowering are not in that collection which is fine for now.
   private def createBuiltinIdentifiers(namesUsedInModule: collection.Set[String]): Iterable[nodes.NewNode] = {
     val result        = mutable.ArrayBuffer.empty[nodes.NewNode]
-    val lineAndColumn = LineAndColumn(1, 1, 1, 1)
+    val lineAndColumn = LineAndColumn(1, 1, 1, 1, 1, 1)
 
     val builtinFunctions = mutable.ArrayBuffer.empty[String]
     val builtinClasses   = mutable.ArrayBuffer.empty[String]
@@ -170,21 +180,7 @@ class PythonAstVisitor(relFileName: String, protected val nodeToCode: NodeToCode
     result
   }
 
-  /** Creates the base for the implicit field accesses of module-level variable references.
-    * @param moduleFullName
-    *   the target module.
-    * @return
-    *   the assignment of the module identifier.
-    */
-  private def createModuleIdentifier(moduleFullName: String): Iterable[nodes.NewNode] = {
-    val lineAndColumn = LineAndColumn(1, 1, 1, 1)
-    // Create implicit identifier
-    val moduleIdentifier = createIdentifierNode("<module>", Store, lineAndColumn)
-    val moduleTypeRef    = createTypeRef("<module>", moduleFullName, lineAndColumn)
-    Seq(createAssignment(moduleIdentifier, moduleTypeRef, lineAndColumn))
-  }
-
-  private def unhandled(node: ast.iast with ast.iattributes): NewNode = {
+  private def unhandled(node: ast.iast & ast.iattributes): NewNode = {
     val unhandledAsUnknown = true
     if (unhandledAsUnknown) {
       nodeBuilder.unknownNode(node.toString, node.getClass.getName, lineAndColOf(node))
@@ -201,6 +197,7 @@ class PythonAstVisitor(relFileName: String, protected val nodeToCode: NodeToCode
       case node: ast.Return           => convert(node)
       case node: ast.Delete           => convert(node)
       case node: ast.Assign           => convert(node)
+      case node: ast.TypeAlias        => unhandled(node)
       case node: ast.AnnAssign        => convert(node)
       case node: ast.AugAssign        => convert(node)
       case node: ast.For              => convert(node)
@@ -320,7 +317,8 @@ class PythonAstVisitor(relFileName: String, protected val nodeToCode: NodeToCode
     bodyProvider: () => Iterable[nodes.NewNode],
     returns: Option[ast.iexpr],
     isAsync: Boolean,
-    lineAndColumn: LineAndColumn
+    lineAndColumn: LineAndColumn,
+    additionalModifiers: List[String] = List.empty
   ): (nodes.NewMethod, nodes.NewMethodRef) = {
     val methodFullName = calculateFullNameFromContext(methodName)
 
@@ -332,6 +330,7 @@ class PythonAstVisitor(relFileName: String, protected val nodeToCode: NodeToCode
         methodName,
         methodFullName,
         scopeName,
+        ModifierTypes.VIRTUAL :: additionalModifiers,
         parameterProvider,
         bodyProvider,
         returns,
@@ -351,6 +350,7 @@ class PythonAstVisitor(relFileName: String, protected val nodeToCode: NodeToCode
     name: String,
     fullName: String,
     scopeName: Option[String],
+    modifiers: List[String],
     parameterProvider: () => MethodParameters,
     bodyProvider: () => Iterable[nodes.NewNode],
     returns: Option[ast.iexpr],
@@ -367,8 +367,12 @@ class PythonAstVisitor(relFileName: String, protected val nodeToCode: NodeToCode
 
     contextStack.pushMethod(scopeName, methodNode, blockNode, methodRefNode)
 
-    val virtualModifierNode = nodeBuilder.modifierNode(ModifierTypes.VIRTUAL)
-    edgeBuilder.astEdge(virtualModifierNode, methodNode, 0)
+    var order = 0
+    for (modifier <- modifiers) {
+      val modifierNode = nodeBuilder.modifierNode(modifier)
+      edgeBuilder.astEdge(modifierNode, methodNode, order)
+      order += 1
+    }
 
     val methodParameter = parameterProvider()
     val parameterOrder  = new AutoIncIndex(methodParameter.posStartIndex)
@@ -394,7 +398,7 @@ class PythonAstVisitor(relFileName: String, protected val nodeToCode: NodeToCode
 
     // For every method that is a module, the local variables can be imported by other modules. This behaviour is
     // much like fields so they are to be linked as fields to this method type
-    if (name == "<module>") contextStack.createMemberLinks(typeDeclNode, edgeBuilder.astEdge, edgeBuilder.refEdge)
+    if (name == "<module>") contextStack.createMemberLinks(typeDeclNode, edgeBuilder.astEdge)
 
     contextStack.pop()
     edgeBuilder.astEdge(typeDeclNode, contextStack.astParent, contextStack.order.getAndInc)
@@ -601,6 +605,7 @@ class PythonAstVisitor(relFileName: String, protected val nodeToCode: NodeToCode
       adapterMethodName,
       adapterMethodFullName,
       Some(adaptedMethodName),
+      ModifierTypes.VIRTUAL :: Nil,
       parameterProvider = () => {
         MethodParameters(
           0,
@@ -692,6 +697,7 @@ class PythonAstVisitor(relFileName: String, protected val nodeToCode: NodeToCode
       methodName,
       methodFullName,
       Some(methodName),
+      ModifierTypes.VIRTUAL :: Nil,
       parameterProvider = () => {
         MethodParameters(1, convert(parametersWithoutSelf, 1))
       },
@@ -742,6 +748,7 @@ class PythonAstVisitor(relFileName: String, protected val nodeToCode: NodeToCode
       newMethodName,
       newMethodStubFullName,
       Some(newMethodName),
+      ModifierTypes.VIRTUAL :: Nil,
       parameterProvider = () => {
         MethodParameters(
           0,
@@ -1279,6 +1286,10 @@ class PythonAstVisitor(relFileName: String, protected val nodeToCode: NodeToCode
   def convert(raise: ast.RaiseP2): NewNode = ???
 
   def convert(errorStatement: ast.ErrorStatement): NewNode = {
+    val code   = nodeToCode.getCode(errorStatement)
+    val line   = errorStatement.attributeProvider.lineno
+    val column = errorStatement.attributeProvider.col_offset
+    logger.warn(s"Could not parse file $relFileName at line $line column $column. Invalid code: $code")
     nodeBuilder.unknownNode(errorStatement.toString, errorStatement.getClass.getName, lineAndColOf(errorStatement))
   }
 
@@ -1310,8 +1321,12 @@ class PythonAstVisitor(relFileName: String, protected val nodeToCode: NodeToCode
       case node: ast.Name           => convert(node)
       case node: ast.List           => convert(node)
       case node: ast.Tuple          => convert(node)
-      case node: ast.Slice          => unhandled(node)
-      case node: ast.StringExpList  => convert(node)
+      case node: ast.Slice          =>
+        // Our expectation is that ast.Slice only appears as part of ast.Subscript
+        // and thus we should never get here becauase convert(ast.Subscript)
+        // directly handles the case of a nested ast.Slice.
+        unhandled(node)
+      case node: ast.StringExpList => convert(node)
     }
   }
 
@@ -1392,7 +1407,7 @@ class PythonAstVisitor(relFileName: String, protected val nodeToCode: NodeToCode
         lambdaCounter.toString
       }
 
-    val name = "<lambda>" + lambdaNumberSuffix
+    val name = nextClosureName()
     val (_, methodRefNode) = createMethodAndMethodRef(
       name,
       Some(name),
@@ -1400,7 +1415,8 @@ class PythonAstVisitor(relFileName: String, protected val nodeToCode: NodeToCode
       () => Iterable.single(convert(new ast.Return(lambda.body, lambda.attributeProvider))),
       returns = None,
       isAsync = false,
-      lineAndColOf(lambda)
+      lineAndColOf(lambda),
+      ModifierTypes.LAMBDA :: Nil
     )
     methodRefNode
   }
@@ -1424,31 +1440,39 @@ class PythonAstVisitor(relFileName: String, protected val nodeToCode: NodeToCode
     */
   // TODO test
   def convert(dict: ast.Dict): NewNode = {
+    val MAX_KV_PAIRS    = 1000
     val tmpVariableName = getUnusedName()
     val dictOperatorCall =
       createLiteralOperatorCall("{", "}", "<operator>.dictLiteral", lineAndColOf(dict))
     val dictVariableAssigNode =
       createAssignmentToIdentifier(tmpVariableName, dictOperatorCall, lineAndColOf(dict))
 
-    val dictElementAssignNodes = dict.keys.zip(dict.values).map { case (key, value) =>
-      key match {
-        case Some(key) =>
-          val indexAccessNode = createIndexAccess(
-            createIdentifierNode(tmpVariableName, Load, lineAndColOf(dict)),
-            convert(key),
-            lineAndColOf(dict)
-          )
+    val dictElementAssignNodes = if (dict.keys.size > MAX_KV_PAIRS) {
+      Seq(
+        nodeBuilder
+          .callNode("<too-many-key-value-pairs>", Constants.ANY, DispatchTypes.STATIC_DISPATCH, lineAndColOf(dict))
+      )
+    } else {
+      dict.keys.zip(dict.values).map { case (key, value) =>
+        key match {
+          case Some(key) =>
+            val indexAccessNode = createIndexAccess(
+              createIdentifierNode(tmpVariableName, Load, lineAndColOf(dict)),
+              convert(key),
+              lineAndColOf(dict)
+            )
 
-          createAssignment(indexAccessNode, convert(value), lineAndColOf(dict))
-        case None =>
-          createXDotYCall(
-            () => createIdentifierNode(tmpVariableName, Load, lineAndColOf(dict)),
-            "update",
-            xMayHaveSideEffects = false,
-            lineAndColOf(dict),
-            convert(value) :: Nil,
-            Nil
-          )
+            createAssignment(indexAccessNode, convert(value), lineAndColOf(dict))
+          case None =>
+            createXDotYCall(
+              () => createIdentifierNode(tmpVariableName, Load, lineAndColOf(dict)),
+              "update",
+              xMayHaveSideEffects = false,
+              lineAndColOf(dict),
+              convert(value) :: Nil,
+              Nil
+            )
+        }
       }
     }
 
@@ -1806,25 +1830,32 @@ class PythonAstVisitor(relFileName: String, protected val nodeToCode: NodeToCode
   def convert(constant: ast.Constant): nodes.NewNode = {
     constant.value match {
       case stringConstant: ast.StringConstant =>
-        nodeBuilder.stringLiteralNode(
-          stringConstant.prefix + stringConstant.quote + stringConstant.value + stringConstant.quote,
-          lineAndColOf(constant)
-        )
+        if (stringConstant.prefix.contains("b") || stringConstant.prefix.contains("B")) {
+          nodeBuilder.bytesLiteralNode(
+            stringConstant.prefix + stringConstant.quote + stringConstant.value + stringConstant.quote,
+            lineAndColOf(constant)
+          )
+        } else {
+          nodeBuilder.stringLiteralNode(
+            stringConstant.prefix + stringConstant.quote + stringConstant.value + stringConstant.quote,
+            lineAndColOf(constant)
+          )
+        }
       case stringConstant: ast.JoinedStringConstant =>
         nodeBuilder.stringLiteralNode(stringConstant.value, lineAndColOf(constant))
       case boolConstant: ast.BoolConstant =>
         val boolStr = if (boolConstant.value) "True" else "False"
-        nodeBuilder.stringLiteralNode(boolStr, lineAndColOf(constant))
+        nodeBuilder.intLiteralNode(boolStr, lineAndColOf(constant))
       case intConstant: ast.IntConstant =>
-        nodeBuilder.numberLiteralNode(intConstant.value, lineAndColOf(constant))
+        nodeBuilder.intLiteralNode(intConstant.value, lineAndColOf(constant))
       case floatConstant: ast.FloatConstant =>
-        nodeBuilder.numberLiteralNode(floatConstant.value, lineAndColOf(constant))
+        nodeBuilder.floatLiteralNode(floatConstant.value, lineAndColOf(constant))
       case imaginaryConstant: ast.ImaginaryConstant =>
-        nodeBuilder.numberLiteralNode(imaginaryConstant.value + "j", lineAndColOf(constant))
+        nodeBuilder.complexLiteralNode(imaginaryConstant.value + "j", lineAndColOf(constant))
       case ast.NoneConstant =>
-        nodeBuilder.numberLiteralNode("None", lineAndColOf(constant))
+        nodeBuilder.literalNode("None", None, lineAndColOf(constant))
       case ast.EllipsisConstant =>
-        nodeBuilder.numberLiteralNode("...", lineAndColOf(constant))
+        nodeBuilder.literalNode("...", None, lineAndColOf(constant))
     }
   }
 
@@ -1860,7 +1891,24 @@ class PythonAstVisitor(relFileName: String, protected val nodeToCode: NodeToCode
   }
 
   def convert(subscript: ast.Subscript): NewNode = {
-    createIndexAccess(convert(subscript.value), convert(subscript.slice), lineAndColOf(subscript))
+    subscript.slice match {
+      case slice: ast.Slice =>
+        val value = convert(subscript.value)
+        val lower = slice.lower.map(convert).getOrElse(nodeBuilder.literalNode("None", None, noLineAndColumn))
+        val upper = slice.upper.map(convert).getOrElse(nodeBuilder.literalNode("None", None, noLineAndColumn))
+        val step  = slice.step.map(convert).getOrElse(nodeBuilder.literalNode("None", None, noLineAndColumn))
+
+        val code = nodeToCode.getCode(subscript)
+        val callNode =
+          nodeBuilder.callNode(code, "<operator>.slice", DispatchTypes.STATIC_DISPATCH, lineAndColOf(slice))
+
+        val args = value :: lower :: upper :: step :: Nil
+        addAstChildrenAsArguments(callNode, 1, args)
+
+        callNode
+      case _ =>
+        createIndexAccess(convert(subscript.value), convert(subscript.slice), lineAndColOf(subscript))
+    }
   }
 
   def convert(starred: ast.Starred): NewNode = {
@@ -1880,12 +1928,11 @@ class PythonAstVisitor(relFileName: String, protected val nodeToCode: NodeToCode
 
   def convert(name: ast.Name): nodes.NewNode = {
     val memoryOperation = memOpMap.get(name).get
+    val identifier      = createIdentifierNode(name.id, memoryOperation, lineAndColOf(name))
     if (contextStack.isClassContext && memoryOperation == Store) {
-      createAndRegisterMember(name.id, lineAndColOf(name))
-      createIdentifierNode(name.id, memoryOperation, lineAndColOf(name))
-    } else {
-      createIdentifierNode(name.id, memoryOperation, lineAndColOf(name))
+      createAndRegisterMember(identifier.name, lineAndColOf(name))
     }
+    identifier
   }
 
   // TODO test
@@ -1926,7 +1973,19 @@ class PythonAstVisitor(relFileName: String, protected val nodeToCode: NodeToCode
     callNode
   }
 
-  def convert(slice: ast.Slice): NewNode = ???
+  def convert(slice: ast.Slice): NewNode = {
+    val args = mutable.ArrayBuffer.empty[NewNode]
+    slice.lower.foreach(expr => args.append(convert(expr)))
+    slice.upper.foreach(expr => args.append(convert(expr)))
+    slice.step.foreach(expr => args.append(convert(expr)))
+
+    val code     = nodeToCode.getCode(slice)
+    val callNode = nodeBuilder.callNode(code, "<operator>.slice", DispatchTypes.STATIC_DISPATCH, lineAndColOf(slice))
+
+    addAstChildrenAsArguments(callNode, 1, args)
+
+    callNode
+  }
 
   def convert(stringExpList: ast.StringExpList): NewNode = {
     val stringNodes = stringExpList.elts.map(convert)
@@ -2027,9 +2086,12 @@ class PythonAstVisitor(relFileName: String, protected val nodeToCode: NodeToCode
 }
 
 object PythonAstVisitor {
-  val builtinPrefix   = "__builtin."
+  private val logger = LoggerFactory.getLogger(getClass)
+
   val typingPrefix    = "typing."
   val metaClassSuffix = "<meta>"
+
+  val noLineAndColumn = LineAndColumn(-1, -1, -1, -1, -1, -1)
 
   // This list contains all functions from https://docs.python.org/3/library/functions.html#built-in-funcs
   // for python version 3.9.5.

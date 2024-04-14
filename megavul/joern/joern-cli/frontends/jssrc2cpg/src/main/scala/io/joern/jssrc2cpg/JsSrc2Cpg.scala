@@ -29,9 +29,8 @@ class JsSrc2Cpg extends X2CpgFrontend[Config] {
         val astCreationPass = new AstCreationPass(cpg, astGenResult, config, report)(config.schemaValidation)
         astCreationPass.createAndApply()
 
-        new TypeNodePass(astCreationPass.allUsedTypes(), cpg).createAndApply()
-        new JsMetaDataPass(cpg, hash, config.inputPath).createAndApply()
-        new BuiltinTypesPass(cpg).createAndApply()
+        JavaScriptTypeNodePass.withRegisteredTypes(astCreationPass.typesSeen(), cpg).createAndApply()
+        new JavaScriptMetaDataPass(cpg, hash, config.inputPath).createAndApply()
         new DependenciesPass(cpg, config).createAndApply()
         new ConfigPass(cpg, config, report).createAndApply()
         new PrivateKeyFilePass(cpg, config, report).createAndApply()
@@ -60,14 +59,10 @@ object JsSrc2Cpg {
     val typeRecoveryConfig = config
       .map(c => XTypeRecoveryConfig(c.typePropagationIterations, !c.disableDummyTypes))
       .getOrElse(XTypeRecoveryConfig())
-    List(
-      new JavaScriptInheritanceNamePass(cpg),
-      new ConstClosurePass(cpg),
-      new ImportResolverPass(cpg),
-      new JavaScriptTypeRecoveryPass(cpg, typeRecoveryConfig),
-      new JavaScriptTypeHintCallLinker(cpg),
-      new NaiveCallLinker(cpg)
-    )
+    List(new JavaScriptInheritanceNamePass(cpg), new ConstClosurePass(cpg), new JavaScriptImportResolverPass(cpg))
+      ++
+        new JavaScriptTypeRecoveryPassGenerator(cpg, typeRecoveryConfig).generate() ++
+        List(new JavaScriptTypeHintCallLinker(cpg), new NaiveCallLinker(cpg))
   }
 
 }
