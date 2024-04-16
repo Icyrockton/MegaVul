@@ -22,11 +22,11 @@ def split_from_file(file_lines: list[str], start_point: tuple, end_point: tuple)
 
 def split_from_file_maybe_flatten(file_lines: list[str], start_point: tuple, end_point: tuple):
     res = split_from_file(file_lines, start_point, end_point)
-    return res[0] if len(res) == 1 else res
+    return "".join(res)
 
-def node_split_from_file(file_lines: list[str], node :Node) -> str | list[str]:
+def node_split_from_file(file_lines: list[str], node :Node) -> str:
     res = split_from_file(file_lines, node.start_point, node.end_point)
-    return res[0] if len(res) == 1 else res
+    return "".join(res)
 
 def traverse_cursor(cursor: TreeCursor) -> Iterator[Node]:
     reached_root = False
