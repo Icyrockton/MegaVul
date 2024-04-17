@@ -54,22 +54,22 @@ It is provided separately to save bandwidth and storage space (unzipping require
 1. `cve_with_graph_abstract_commit.json`
 2. `megavul.json`
 3. `megavul_simple.json`
-4. `megavul_graph.zip`
+4. `megavul_graph.zip` (Linux command to uncompressed `unzip megavul_graph.zip -d /path/to/graph`)
 
 ### ⏩ Simple UseCase
 
 Refer [specification](#dataset-specification) for more information about the **fields** in the dataset.
 
-More code examples can be found in the `examples` folder.
+More code examples can be found in the **`examples`** folder.
 
 The following code reads `megavul_simple.json`
 
 ```python
 import json
 from pathlib import Path
-graph_dir = Path('../megavul/storage/result/graph')
+graph_dir = Path('../megavul/storage/result/c_cpp/graph')
 
-with Path("../megavul/storage/result/megavul_simple.json").open(mode='r') as f:
+with Path("../megavul/storage/result/c_cpp/megavul_simple.json").open(mode='r') as f:
     megavul = json.load(f)
     item = megavul[9]
     cve_id = item['cve_id'] # CVE-2022-24786
@@ -258,16 +258,16 @@ you can use [tree-sitter-java](https://github.com/tree-sitter/tree-sitter-java) 
 
 ### MegaVul Statistics
 
-|                                  |    C/CPP     |    Java    |
-|----------------------------------|:------------:|:----------:|
-| Number of Repositories           |     1062     |    362     |
-| Number of CVE IDs                |     8476     |    775     |
-| Number of CWE IDs                |     176      |    115     |
-| Number of Commits                |     9289     |    902     |
-| Number of Vul/Non-Vul Function   | 17979/335994 | 2433/39541 |
-| Success Rate of Graph Generation |     87%      |    100%    |
+|                                  | MegaVul(C/CPP) | MegaVul(Java) |   Big-Vul    |
+|----------------------------------|:--------------:|:-------------:|:------------:|
+| Number of Repositories           |      1062      |      362      |     310      |
+| Number of CVE IDs                |      8476      |      775      |     3539     |
+| Number of CWE IDs                |      176       |      115      |      92      |
+| Number of Commits                |      9289      |      902      |     4058     |
+| Number of Vul/Non-Vul Function   |  17979/335994  |  2433/39541   | 10900/177736 |
+| Success Rate of Graph Generation |      87%       |     100%      |     None     |
 
-`Updated: 2024/4`
+`Updated: 2024/04`
 
 
 ### Specification

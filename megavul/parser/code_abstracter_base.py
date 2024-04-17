@@ -52,7 +52,7 @@ class CodeAbstracterBase(metaclass=ABCMeta):
         tree = parser.parse(bytes(code, encoding='utf-8'))
 
         position_map: dict[
-            int, list[tuple]] = {}  # row -> list[(col, internal_id, abstract_type, text, need_replace_to_whitespace)]
+            str, list[tuple]] = {}  # row -> list[(col, internal_id, abstract_type, text, need_replace_to_whitespace)]
         abstract_type_map: dict[str, dict[str, str]] = {}
 
         for abstract_type in CodeAbstracterBase.ALL_ABSTRACT_TYPES:
@@ -63,8 +63,8 @@ class CodeAbstracterBase(metaclass=ABCMeta):
         def add_to_position_map(row: int, col: int, internal_id: int, abstract_type: str, node_text: str,
                                 need_replace_to_whitespace=False):
             nonlocal position_map
-            position_map.setdefault(row, [])
-            position_map[row].append((col, internal_id, abstract_type, node_text, need_replace_to_whitespace))
+            position_map.setdefault(str(row), [])
+            position_map[str(row)].append((col, internal_id, abstract_type, node_text, need_replace_to_whitespace))
 
         def node_abstract(node: Node, abstract_type: str):
             nonlocal global_internal_id_cnt, position_map, abstract_type_map
@@ -132,7 +132,7 @@ def check_abstract_config(abstract_config: dict):
             raise RuntimeError(f"Only support abstract {all_abstract_types}")
 
 
-def abstract_code_with_config(code: str, position_map: dict[int, list[tuple]],
+def abstract_code_with_config(code: str, position_map: dict[str, list[tuple]],
                               abstract_table: dict[str, dict], abstract_config: dict):
     check_abstract_config(abstract_config)
 
@@ -144,6 +144,7 @@ def abstract_code_with_config(code: str, position_map: dict[int, list[tuple]],
 
     new_line_of_code = []
     for line, line_of_code in enumerate(code.splitlines(keepends=True)):
+        line = str(line)
         if line not in position_map:
             new_line_of_code.append(line_of_code)
             continue

@@ -1,8 +1,8 @@
 import json
 from pathlib import Path
-graph_dir = Path('../megavul/storage/result/graph')
+graph_dir = Path('../megavul/storage/result/c_cpp/graph')
 
-with Path("../megavul/storage/result/megavul_simple.json").open(mode='r') as f:
+with Path("../megavul/storage/result/c_cpp/megavul_simple.json").open(mode='r') as f:
     megavul = json.load(f)
     item = megavul[9]
     cve_id = item['cve_id'] # CVE-2022-24786
