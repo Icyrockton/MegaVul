@@ -264,7 +264,7 @@ you can use [tree-sitter-java](https://github.com/tree-sitter/tree-sitter-java) 
 | Number of CVE IDs                |      8476      |      775      |     3539     |
 | Number of CWE IDs                |      176       |      115      |      92      |
 | Number of Commits                |      9289      |      902      |     4058     |
-| Number of Vul/Non-Vul Function   |  17979/335994  |  2433/39541   | 10900/177736 |
+| Number of Vul/Non-Vul Function   |  17978/335905  |  2433/39516   | 10900/177736 |
 | Success Rate of Graph Generation |      87%       |     100%      |     None     |
 
 `Updated: 2024/04`

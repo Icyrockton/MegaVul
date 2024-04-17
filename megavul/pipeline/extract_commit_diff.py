@@ -129,6 +129,7 @@ def parse_all_commit_files(logger: logging.Logger, cve_with_commit: list[CveWith
             for parser in parser_list:
                 if parser.can_handle_this_language(file_type):
                     parser.parse_file(raw_file, parsed_file_save_dst)
+                    break
 
 def check_commit_all_file_parsed_successfully(logger: logging.Logger, commit: DownloadedCommitInfo) -> bool:
     new_repo_name = repo_name_merge(commit.repo_name)
@@ -224,7 +225,7 @@ def find_successfully_parsed_commit(logger: logging.Logger, cve_with_commit: lis
                         # function keep unchanged, non-vulnerable
                         non_vulnerable_funcs.append(
                             NonVulnerableFunction(
-                                func_name, this_func.parameter_list_signature, this_func.parameter_list, this_func.return_type, this_func.func, '',
+                                this_func.func_name, this_func.parameter_list_signature, this_func.parameter_list, this_func.return_type, this_func.func, '',
                                 {}, None
                             )
                         )
@@ -234,7 +235,7 @@ def find_successfully_parsed_commit(logger: logging.Logger, cve_with_commit: lis
 
                         vulnerable_funcs.append(
                             VulnerableFunction(
-                                func_name,
+                                parent_func.func_name,
                                 parent_func.parameter_list_signature, parent_func.parameter_list, parent_func.return_type, parent_func.func , '', {}, None,
                                 this_func.parameter_list_signature, this_func.parameter_list, this_func.return_type, this_func.func, '' , {},  None ,
                                 diff_func, diff_line_dict

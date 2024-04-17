@@ -21,6 +21,8 @@ class ParserC(ParserCLike):
 
         return_type_node = cursor.node.child_by_field_name('type')
         return_type = node_split_from_file(file_lines, return_type_node)
+        if isinstance(return_type,list):
+            return None
         cursor.goto_first_child()
 
         func_name = None

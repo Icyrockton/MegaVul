@@ -24,6 +24,8 @@ class ParserCpp(ParserCLike):
         return_type = None
         if return_type_node is not None:
             return_type = node_split_from_file(file_lines,return_type_node)
+            if isinstance(return_type, list):
+                return None
         cursor.goto_first_child()
 
         func_name = None
@@ -126,7 +128,7 @@ class ParserCpp(ParserCLike):
 
         if return_type is None:
             return_type = func_name
-            if return_type.startswith('~'):  # destructor name
+            if return_type.find('~') >= 0:  # destructor name
                 return_type = ''
 
         func = node_split_from_file(file_lines, func_node)
