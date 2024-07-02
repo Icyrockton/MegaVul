@@ -280,7 +280,7 @@ If you use MegaVul for your research, please cite our MSR(2024) paper:
 
 ```
 @inproceedings{ni2024megavul,
-  title={MegaVul: AC/C++ Vulnerability Dataset with Comprehensive Code Representations},
+  title={MegaVul: A C/C++ Vulnerability Dataset with Comprehensive Code Representations},
   author={Ni, Chao and Shen, Liyu and Yang, Xiaohu and Zhu, Yan and Wang, Shaohua},
   booktitle={2024 IEEE/ACM 21st International Conference on Mining Software Repositories (MSR)},
   pages={738--742},
