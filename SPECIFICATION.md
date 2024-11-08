@@ -187,7 +187,7 @@ for `variable`.
 |----------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | inNode   | start node of the edge                                                                                                                                                                    |
 | outNode  | end node of the edge                                                                                                                                                                      |
-| label    | type of edge: `ARGUMENT`,`AST`,`BINDS`,`CALL`,`CDG`, `CFG`,`CONDITION`, `CONTAINS`,`DOMINATE`,`EVAL_TYPE`,`PARAMETER_LINK`,`POST_DOMINATE`, `REACHING_DEF`,`RECEIVER`,`REF`,`SOURCE_FILE` |
+| etype    | type of edge: `ARGUMENT`,`AST`,`BINDS`,`CALL`,`CDG`, `CFG`,`CONDITION`, `CONTAINS`,`DOMINATE`,`EVAL_TYPE`,`PARAMETER_LINK`,`POST_DOMINATE`, `REACHING_DEF`,`RECEIVER`,`REF`,`SOURCE_FILE` |
 | variable | variable referenced by edge                                                                                                                                                               |
 
 The most useful types of edges: `AST`, `CDG`, `CFG`, `REACHING_DEF`(aka. DDG)
