@@ -95,6 +95,60 @@ with Path("../megavul/storage/result/c_cpp/megavul_simple.json").open(mode='r') 
 ------
 
 ## 🐛 Crawling From Scratch
+There are two ways to run MegaVul: installed or from a Docker image.
+Either way requires 1) a config file and 2) a file that contains six or more github tokens, so start by making those files.
+
+### Create the config files
+
+Configuration items **need to be filled** in `megavul/config.yaml` and `megavul/github_token.txt`.
+
+Generate GitHub RESTful token
+1. https://github.com/settings/tokens
+2. Generate new token(classic)
+3. No scope needs to be checked, fill in the name
+4. Directly generate a token starting with `ghp_xxxx` or `gho_xxxx`.
+
+A sample `config.yaml` file is as follows
+```yaml
+proxy:
+  enable: false
+  http_url: http://127.0.0.1:7890
+  https_url:  http://127.0.0.1:7890
+
+dependencies:
+  java: /home/tom/.sdkman/candidates/java/current/bin
+  scala: /home/tom/.sdkman/candidates/scala/current/bin
+  sbt: /home/tom/.sdkman/candidates/sbt/current/bin
+  node: /usr/local/node/bin
+  tree-sitter: /usr/local/tree-sitter
+  github-linguist: /usr/local/bin/github-linguist
+
+crawling_language:
+  c_cpp  # [c_cpp, java]
+
+log_level:
+  INFO # [DEBUG, INFO, WARNING, ERROR]
+```
+
+Create a empty file named `github_token.txt` and fill it with all github tokens (one line one token)
+
+Sample file:
+```text
+ghp_xxxx11111
+ghp_xxxx22222
+```
+
+### Docker image
+
+We provide out-of-box docker image, pull it and run MegaVul straight away!
+Run this command from the directory where the config files reside:
+
+```shell
+docker run -it \
+-v $(pwd)/config.yaml:/MegaVul/megavul/config.yaml:ro \
+-v $(pwd)/github_token.txt:/MegaVul/megavul/github_token.txt:ro   \
+icyrockton/megavul python megavul/main.py
+```
 
 ### 💡Prerequisites
 - Linux required (Ubuntu 20.04+ recommend)
@@ -154,57 +208,6 @@ which java && which scala && which sbt
 sudo apt-get install build-essential cmake pkg-config libicu-dev zlib1g-dev libcurl4-openssl-dev libssl-dev ruby-dev
 gem install github-linguist
 which github-linguist
-```
-
-### Docker image
-
-We provide out-of-box docker image, pull it and run MegaVul straight away!
-```shell
-docker pull icyrockton/megavul
-docker run -it icyrockton/megavul
-(megavul) root@8345683f69d9:/MegaVul#: vim megavul/config.yaml
-(megavul) root@8345683f69d9:/MegaVul#: vim megavul/github_token.txt
-(megavul) root@8345683f69d9:/MegaVul#: python megavul/main.py
-```
-
-### Config file preparations
-
-Configuration items **need to be filled** in `megavul/config.yaml` and `megavul/github_token.txt`.
-
-Generate GitHub RESTful token
-1. https://github.com/settings/tokens
-2. Generate new token(classic)
-3. No scope needs to be checked, fill in the name
-4. Directly generate a token starting with `ghp_xxxx` or `gho_xxxx`.
-
-A sample `config.yaml` file is as follows
-```yaml
-proxy:
-  enable: false
-  http_url: http://127.0.0.1:7890
-  https_url:  http://127.0.0.1:7890
-
-dependencies:
-  java: /home/tom/.sdkman/candidates/java/current/bin
-  scala: /home/tom/.sdkman/candidates/scala/current/bin
-  sbt: /home/tom/.sdkman/candidates/sbt/current/bin
-  node: /usr/local/node/bin
-  tree-sitter: /usr/local/tree-sitter
-  github-linguist: /usr/local/bin/github-linguist
-
-crawling_language:
-  c_cpp  # [c_cpp, java]
-
-log_level:
-  INFO # [DEBUG, INFO, WARNING, ERROR]
-```
-
-Create a empty file named `github_token.txt` and fill it with all github tokens (one line one token)
-
-Sample file:
-```text
-ghp_xxxx11111
-ghp_xxxx22222
 ```
 
 ### 🚀 Run the pipelines
